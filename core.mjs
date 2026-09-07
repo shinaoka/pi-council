@@ -36,7 +36,7 @@ export function validateConfig(raw) {
   const chair = raw.chair ?? participants[0].name;
   check(participants.some(p => p.name === chair), 'Chair must name a participant');
   return { participants, chair,
-    timeoutSeconds: integer(raw.timeoutSeconds, 120, 10, 600, 'timeoutSeconds'),
+    timeoutSeconds: integer(raw.timeoutSeconds, 600, 10, 600, 'timeoutSeconds'),
     maxRounds: integer(raw.maxRounds, 10, 1, Number.MAX_SAFE_INTEGER, 'maxRounds') };
 }
 export function resolveParticipants(config, registry) {

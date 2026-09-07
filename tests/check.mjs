@@ -25,6 +25,8 @@ const config = validateConfig({ participants: [
 const model = { id: 'model/a:1', name: 'test', provider: 'test', api: 'openai-completions', reasoning: false, input: ['text'], contextWindow: 128000, maxTokens: 4096, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
 const registry = { find: (p, id) => p === 'test' ? { ...model, id } : undefined, hasConfiguredAuth: () => true };
 assert.equal(config.maxRounds, 10);
+assert.equal(config.timeoutSeconds, 600);
+assert.equal(validateConfig({ ...config, timeoutSeconds: 120 }).timeoutSeconds, 120);
 assert.equal(validateConfig({ ...config, maxRounds: 25 }).maxRounds, 25);
 assert.throws(() => validateConfig({ ...config, maxRounds: 0 }));
 assert.throws(() => validateConfig({ ...config, maxRounds: 1.5 }));
@@ -190,6 +192,7 @@ try {
     await command.handler('setup', context);
     const template = readFileSync(join(dir, 'council.json'), 'utf8');
     assert(template.includes('PROVIDER/MODEL_ID'));
+    assert.equal(JSON.parse(template).timeoutSeconds, 600);
     await command.handler('setup', context);
     assert.equal(readFileSync(join(dir, 'council.json'), 'utf8'), template, 'Existing config must not be overwritten');
     unlinkSync(join(dir, 'council.json'));

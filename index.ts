@@ -49,7 +49,7 @@ export default function (pi: ExtensionAPI) {
         participants: [
           { name: 'architect', model: 'PROVIDER/MODEL_ID', role: 'Propose the simplest viable design', thinking: 'medium' },
           { name: 'critic', model: 'PROVIDER/OTHER_MODEL_ID', role: 'Challenge assumptions, safety and test coverage', thinking: 'medium' },
-        ], chair: 'architect', timeoutSeconds: 120, maxRounds: 10,
+        ], chair: 'architect', timeoutSeconds: 600, maxRounds: 10,
       };
       writeFileSync(configFile, JSON.stringify(template, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
       show(`Created template: ${configFile}\nReplace placeholders with exact IDs from /council models. No model requests were made.`);

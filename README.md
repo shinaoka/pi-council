@@ -36,7 +36,7 @@ All extension UI, help and built-in instructions are English. Contributions and 
     { "name": "critic", "model": "provider/another-model-id", "role": "Challenge assumptions and identify risks", "thinking": "medium" }
   ],
   "chair": "architect",
-  "timeoutSeconds": 120,
+  "timeoutSeconds": 600,
   "maxRounds": 10
 }
 ```
@@ -49,7 +49,7 @@ The default discussion limit is **10 rounds**, including the initial independent
 
 ## Time budget
 
-Set `"timeoutSeconds": 300` in `council.json` for a five-minute budget **per participant response**, including tool use. The same budget applies to the chair's synthesis. This is not a total meeting budget; participants run in parallel. New meetings snapshot the value along with the participant list.
+The default is **600 seconds (10 minutes)**. Set `"timeoutSeconds": 300` in `council.json` to override it with a five-minute budget **per participant response**, including tool use. The same budget applies to the chair's synthesis. This is not a total meeting budget; participants run in parallel. New meetings snapshot the value along with the participant list.
 
 Every discussion/synthesis model request receives an ephemeral English reminder containing the total budget, UTC deadline and remaining seconds. Remaining time is recalculated after tool execution; reminders do not accumulate in saved history. Models are told to stop exploring in time to return findings and explicitly name unfinished checks. SDK-internal compaction is not a discussion request and uses its own prompt, but still falls under the response timer.
 
