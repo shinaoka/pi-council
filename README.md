@@ -1,39 +1,47 @@
-# pin-council
+# pi-council
 
-Persistent multi-model discussions and implementation planning for [pi](https://pi.dev/).
-Tested with pi 0.85.1 and Node.js 22. No additional runtime dependencies beyond pi.
+Automatic multi-model discussions and planning for [pi](https://pi.dev/). Tested with pi 0.85.1 and Node.js 22. Uses pi's SDK and bundled packages only.
 
-## Install
+## Install and use
 
 ```sh
-pi install git:github.com/shinaoka/pin-council
+pi install git:github.com/shinaoka/pi-council
 ```
 
-Run `/reload`, then `/council setup` and `/council-plan new <topic>`.
+Inside pi:
+
+```text
+/reload
+/council setup
+/council-plan Design an offline search feature
+```
+
+Then use natural language: **“Have the council reconsider migration and rollback safety.”** The parent calls the `council` tool with your feedback, reusing the same in-memory participant sessions. No `new`, `round`, or `finish` commands are needed.
+
+`/council <topic>` starts a general discussion instead of a plan. Both topic commands start a fresh council. `/council help`, `/council models`, and `/council setup` provide help and configuration. Use **Esc** to cancel an active tool, or `/council stop`. A normal natural-language stop request may be queued until the current tool finishes, so use these controls for immediate cancellation.
+
 For local development, use `pi -e ./index.ts` or link this directory under `~/.pi/agent/extensions/`. Use only one installation method to avoid duplicate commands.
 
-All extension UI, help and built-in instructions are English. Contributions and plans follow the language requested in the topic.
+## Discussion and synthesis
 
-## Design
+1. Each participant gives an independent proposal.
+2. The configured **chair** reads the proposals and writes a synthesis preserving alternatives, dissent and unresolved questions.
+3. If the chair requests further discussion, participants critique the peer answers and chair synthesis, then the chair revises its synthesis.
+4. Stop when the chair recommends human review or the iteration limit is reached. Return the latest synthesis, clearly distinguishing those two reasons.
 
-- `/council` is the discussion engine; `/council-plan` uses the same engine with a planning prompt and PLAN output.
-- One persistent SDK session per participant, not one per round. Session JSONL is reopened for each operation; no idle child processes. Other participants' published answers are explicitly forwarded by the facilitator.
-- Global configuration only: `~/.pi/agent/council.json` (respects pi's agent directory). Missing configuration offers model selection, template creation, or cancellation. Credentials remain with pi, never in this file.
-- Meetings snapshot participant configuration. Editing configuration affects only new meetings. The first participant is the default chair.
-- Participants only receive read/grep/find/ls; no extensions, skills, shell, or write tools are loaded into children. This is a tool restriction, not a filesystem sandbox: read tools may access paths outside the project. Parent context is not automatically copied. Project context files are included only when the parent trusts the project.
-- Round 1 is independent; later rounds receive the previous round's published answers and user feedback. Each command runs one round, so the user controls continuation. The chair synthesizes all recorded rounds, keeping disagreements visible.
-- Private meeting storage is outside the repository, under `~/.pi/agent/council/meetings/`. A per-meeting exclusive lock prevents simultaneous writers. JSON manifests use atomic replacement. Failed/aborted rounds are recorded, not presented as successful. No automatic retries at the meeting level.
-- Shutdown/reload aborts active SDK work and waits for cleanup. A normal operation has a configured deadline and a 20-turn cap per participant. SDK/network cancellation is cooperative, not process isolation.
+The default limit is **10 iterations per user request**. Each iteration includes participant responses and one chair synthesis. A fresh council always gets an independent-proposal iteration and then a peer-critique iteration before early stopping (unless you explicitly set `maxRounds` to 1). An explicit follow-up request gets a new bounded loop using the same conversation histories. The chair is one of the participants, not an additional model. Its decision is advice, **not proof of unanimity, correctness or human approval**. A failed participant or malformed chair decision stops the loop rather than pretending consensus or silently retrying.
+
+The `council` tool takes `task` (topic or feedback), optional `newMeeting`, and optional `mode` (`plan` or `discussion`, used when starting). Set `newMeeting: true` to start; otherwise an active council is required. After reload, feedback alone cannot silently start a context-free replacement. The parent model selects the tool for natural-language council requests; it is instructed not to restart the automatic loop without a new user request. The extension does not automatically intercept unrelated conversation or the existing `/plan` command.
 
 ## Configuration
 
-`/council models` displays exact authenticated `provider/model-id` values from the parent pi registry. `/council setup` selects participants interactively or creates a template. Existing configuration is never overwritten by setup.
+`~/.pi/agent/council.json` is the only extension-specific saved configuration (respects pi's agent directory). If absent, choose registered models interactively, create a template, or cancel. Interactive choices can optionally be saved. Existing files are never overwritten by setup; edit them directly.
 
 ```json
 {
   "participants": [
-    { "name": "architect", "model": "provider/exact-model-id", "role": "Propose the simplest viable design", "thinking": "medium" },
-    { "name": "critic", "model": "provider/another-model-id", "role": "Challenge assumptions and identify risks", "thinking": "medium" }
+    { "name": "architect", "model": "PROVIDER/MODEL_ID", "role": "Propose the simplest viable design", "thinking": "medium" },
+    { "name": "critic", "model": "PROVIDER/OTHER_MODEL_ID", "role": "Challenge assumptions, safety and tests", "thinking": "medium" }
   ],
   "chair": "architect",
   "timeoutSeconds": 600,
@@ -41,45 +49,30 @@ All extension UI, help and built-in instructions are English. Contributions and 
 }
 ```
 
-Replace placeholder model IDs with values from `/council models`. The template intentionally cannot start paid requests until edited. Model IDs are split at the first slash, preserving provider-specific IDs containing additional slashes or colons. Thinking is a separate field: off/minimal/low/medium/high/xhigh/max. SDK capability clamping is reported in operation results. 2–6 participants; timeout 10–600 seconds. `maxRounds` defaults to 10 and accepts any positive safe integer. Models unavailable in pi fail before meeting creation. Extension-registered provider definitions are copied to a dedicated ModelRuntime without loading the extensions in children. Host request hooks and transient CLI-only credentials are not copied.
+Replace model placeholders with exact IDs from `/council models`. Authentication remains with pi (`/login`, environment variables, or `models.json`), never in this file. Model IDs are split at the first slash; additional slashes and colons are preserved. Thinking is separate: off/minimal/low/medium/high/xhigh/max; effective SDK-clamped values appear in the result.
 
-## Iteration limit
+Choose 2–6 participants. `chair` defaults to the first participant. `maxRounds` accepts any positive safe integer; `timeoutSeconds` accepts 10–600 seconds. A new council snapshots configuration; edits apply the next time you start a council with a topic command or `newMeeting: true`.
 
-The default discussion limit is **10 rounds**, including the initial independent proposals. Set `"maxRounds": 20` (or another positive integer) in `council.json` to override it for new meetings. Synthesis via `finish` does not count as a discussion round. Failed or interrupted rounds do count, preventing unbounded retries. Each `round` command advances one iteration; this is an upper limit, not an automatic ten-round loop.
+## Time budget and cost
 
-## Time budget
+Default: **600 seconds per individual response**, including tool use. The chair gets the same budget for each synthesis. This is not a total meeting deadline. Models receive an English reminder on every discussion/synthesis request with total budget, UTC deadline and remaining seconds, refreshed after tool use. The reminder instructs them to stop exploring in time to return a useful answer with unfinished checks clearly named.
 
-The default is **600 seconds (10 minutes)**. Set `"timeoutSeconds": 300` in `council.json` to override it with a five-minute budget **per participant response**, including tool use. The same budget applies to the chair's synthesis. This is not a total meeting budget; participants run in parallel. New meetings snapshot the value along with the participant list.
+A pi-side timer calls `session.abort()` at the deadline. This is cooperative cancellation, not process isolation. Setup is outside the response budget; model-runtime initialization has a separate 15-second deadline. Each response also has a 20-turn cap. SDK-internal compaction uses its own prompt but remains subject to the response timer.
 
-Every discussion/synthesis model request receives an ephemeral English reminder containing the total budget, UTC deadline and remaining seconds. Remaining time is recalculated after tool execution; reminders do not accumulate in saved history. Models are told to stop exploring in time to return findings and explicitly name unfinished checks. SDK-internal compaction is not a discussion request and uses its own prompt, but still falls under the response timer.
+Automatic discussion can be expensive: with N participants, up to `(N + 1) × maxRounds` response runs are possible per request, plus tool continuations and SDK compaction. Reduce `maxRounds` or use cheaper models if appropriate. Child usage is not added to the parent's footer.
 
-The deadline is enforced by a pi-side timer using `session.abort()`, not by trusting the prompt. Timeout/cancellation is recorded as a failure, never as a completed answer. Cancellation is cooperative: this is not a hard process-kill boundary. Time spent preparing the SDK session is outside the response budget; model runtime initialization separately has a 15-second deadline.
+## State and safety
 
-## Commands
-
-```
-/council-plan new Design an offline search feature
-/council round Also consider migration and rollback
-/council round Respond to the remaining objections
-/council finish
-/council status
-/council list
-/council resume <meeting-id>
-/council stop
-```
-
-`/council-plan <topic>` also starts a planning meeting; `/council new <topic>` starts a general discussion. Both commands share one selected meeting. `resume` selects a meeting without making API requests; the next `round` or `finish` reopens its saved participant sessions. The selected ID is restored on parent session reload; use `list`/`resume` from another parent session. Resume requires the same canonical working directory.
-
-`finish` requires a fully successful latest round. It asks the saved chair session to produce a synthesis, then saves a new, non-overwriting `PLAN-<timestamp>-<uuid>.md` (planning) or `CONCLUSION-...md` (general) inside the meeting directory. A saved PLAN is a draft for human approval; this extension never executes it. You can continue discussing after synthesis. Partial results and failures are retained in `meeting.json`; individual full histories are in `sessions/`.
-
-Discussion execution requires interactive or RPC mode (not print/JSON mode). Results appear as messages without triggering the parent model. Round and synthesis output is bounded in the UI, with the full artifact path provided. The extension does not automatically hook existing `/plan` or require pi-subagents/pi-brainstorm.
-
-## Recovery and limits
-
-A hard process crash can leave `operation.lock`. The error identifies its location. Verify the owning process has exited before manually deleting that lock; no automatic stale-lock stealing. If a crash happened during a round, its in-progress entries are shown as interrupted on the next operation, while the underlying SDK histories are preserved.
-
-Round exchange/synthesis is limited to 120,000 characters, failing explicitly instead of silently truncating evidence. SDK compaction may summarize older per-participant history. Files can contain sensitive project information; do not publish them casually. API cost is multiplied by participant count; no real model calls are made by setup or resume. Usage remains in child sessions, not the parent's footer.
+- One in-memory SDK session per participant; no waiting child processes and no separate meeting, transcript, session or PLAN files. The final PLAN is returned in chat, not written into the repository.
+- **Exit, `/reload`, or switching parent sessions discards the council.** Pi itself may still persist normal parent chat and tool output under its own settings. This extension is not a no-logging/privacy mode.
+- Starting a new council discards the previous one. Older versions' saved meeting directories are neither used nor deleted.
+- Participants can use only read/grep/find/ls. No child extensions, skills, shell or write tools. This is a tool restriction, not a filesystem sandbox: readable paths outside the project remain accessible.
+- Project context is included only when the parent trusts the project. Parent chat is not copied wholesale; include relevant constraints in the topic or feedback. Native/registered provider definitions and pi's credential files are reused; host request hooks and transient CLI-only credentials are not copied.
+- Peer exchange is limited to 120,000 characters and fails explicitly if exceeded. Parent tool output is bounded to 48,000 characters with an explicit truncation notice. SDK compaction may summarize older participant history.
+- UI, help and built-in instructions are English. Discussion and PLAN language follow the topic/user feedback. Plans require human review; no implementation is started.
 
 ## Verification
 
-Run `node tests/check.mjs` from this directory. Tests resolve the installed SDK from `PI_COUNCIL_SDK` (package directory) or the real `pi` executable. No network requests are made. Test coverage includes configuration validation, real SDK session persistence and reopening with a mock stream, round exchange, partial failure, synthesis, cancellation, lock exclusion, and extension discovery. Live provider authentication and TUI interaction require a separate manual smoke test.
+Run `npm test`. Tests use real SDK in-memory sessions with mock model streams: same-session follow-up, no saved artifacts, peer exchange, automatic iteration/early stop/limit, failure and invalid chair decisions, cancellation, refreshed time reminders, timeout, setup UI and extension discovery. No model API requests are made. Live provider behavior and real TUI interaction need a separate smoke test.
+
+Tests resolve the SDK from a local installation, `PI_COUNCIL_SDK` (package directory), or the installed `pi` executable.
