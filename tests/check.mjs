@@ -38,6 +38,7 @@ assert.throws(() => validateConfig({ participants: [config.participants[0], conf
 
 let fail = false, stall = false, toolProbe = false, keepDiscussing = false, invalidDecision = false;
 const probeCalls = new Set(), observed = [];
+let planOutput = '# Detailed Implementation Plan\n\n## Task 1\n- [ ] Write the failing test.\n- [ ] Implement the approved change.\n';
 const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 const { AssistantMessageEventStream } = await import(pathToFileURL(join(root, 'node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js')));
 const runtime = {
@@ -45,12 +46,13 @@ const runtime = {
   getModel: (p, id) => ({ ...model, provider: p, id }),
   streamSimple(m, context, options) {
     const stream = new AssistantMessageEventStream();
-    observed.push({ id: m.id, messages: structuredClone(context.messages), tools: context.tools });
+    observed.push({ id: m.id, messages: structuredClone(context.messages), tools: context.tools, systemPrompt: context.systemPrompt });
     const emit = (aborted = false) => {
       const error = aborted || (fail && m.id === 'model-b');
       const message = { role: 'assistant', api: m.api, provider: m.provider, model: m.id, usage,
-        content: [{ type: 'text', text: (JSON.stringify(context.messages.at(-2)).includes('CHAIR SYNTHESIS')
-          ? `${invalidDecision ? 'MAYBE' : keepDiscussing ? 'CONTINUE' : 'DONE'}\n` : '') + `${m.id}: published answer` }],
+        content: [{ type: 'text', text: JSON.stringify(context.messages.at(-2)).includes('DETAILED IMPLEMENTATION PLAN')
+          ? planOutput : (JSON.stringify(context.messages.at(-2)).includes('CHAIR SYNTHESIS')
+            ? `${invalidDecision ? 'MAYBE' : keepDiscussing ? 'CONTINUE' : 'DONE'}\n` : '') + `${m.id}: published answer` }],
         stopReason: aborted ? 'aborted' : error ? 'error' : 'stop', timestamp: Date.now(),
         ...(error ? { errorMessage: aborted ? 'cancelled' : 'mock failure' } : {}) };
       stream.push(error ? { type: 'error', reason: message.stopReason, error: message } : { type: 'done', reason: 'stop', message });
@@ -76,6 +78,9 @@ try {
   const first = await council.run('Initial constraint');
   assert.match(first, /Chair recommends human review/);
   assert.match(first, /Iterations this request: 2\/10/);
+  assert(first.includes('Do not start that stage automatically'));
+  assert(JSON.stringify(observed[0].messages.at(-2)).includes('design SPEC'));
+  assert(observed.every(o => !JSON.stringify(o.messages.at(-2)).includes('DETAILED IMPLEMENTATION PLAN')), 'Discussion must not trigger detailed planning');
   assert(council.meeting.lastRound.results.every(r => r.status === 'ok'));
   const sessions = [...council.sessions.values()].map(s => s.session);
   assert(sessions.every(s => s.sessionFile === undefined));
@@ -91,16 +96,41 @@ try {
   assert.match(await council.run('Keep dissent visible'), /published answer/);
   assert.deepEqual(readdirSync(dir), [], 'No meeting, transcript, session or PLAN files');
 
+  const design = council.meeting.lastRound.summary;
+  const beforePlan = observed.length;
+  await assert.rejects(() => council.implementationPlan({ approved: false }), /approval/i);
+  assert.equal(observed.length, beforePlan, 'No model call without approval');
+  const plan = await council.implementationPlan({ approved: true, instructions: 'Include rollback tests' });
+  assert.equal(plan, planOutput);
+  assert.equal(observed.length, beforePlan + 1, 'Only the chair expands the design; no debate loop');
+  assert.equal(observed.at(-1).id, model.id);
+  assert.equal(council.meeting.lastRound.summary, design, 'Detailed planning must not replace the source design');
+  const detailPrompt = JSON.stringify(observed.at(-1).messages.at(-2));
+  for (const phrase of [design, 'Include rollback tests', 'exact file paths', '2–5 minutes', 'test code', 'expected results', 'Self-review']) assert(detailPrompt.includes(phrase), phrase);
+  assert.match(observed.at(-1).systemPrompt, /Detailed implementation plans have no word limit/);
+  assert(JSON.stringify(observed.at(-1).messages.at(-1)).includes('TIME BUDGET'));
+  assert.deepEqual([...council.sessions.values()].map(s => s.session), sessions);
+  assert.deepEqual(readdirSync(dir), [], 'Detailed planning must not save files');
+  const normalPlan = planOutput;
+  for (const oversized of ['x'.repeat(48001), '設'.repeat(17000), 'line\n'.repeat(2000)]) {
+    planOutput = oversized;
+    await assert.rejects(() => council.implementationPlan({ approved: true }), /too large/i);
+  }
+  planOutput = normalPlan;
+
   fail = true;
   const beforeFailure = observed.length;
   await assert.rejects(() => council.run('Fail one participant'), /Discussion interrupted/);
   assert(council.meeting.lastRound.results.some(r => r.status === 'error'));
   assert.equal(observed.length - beforeFailure, 2, 'Failure must stop before chair synthesis or another iteration');
+  await assert.rejects(() => council.implementationPlan({ approved: true }), /completed.*synthesis/i);
+  assert.equal(observed.length - beforeFailure, 2, 'Do not plan from an older synthesis after a failed discussion');
   fail = false;
   stall = true;
   const active = assert.rejects(() => council.run('Wait for cancellation'), /Discussion interrupted/);
   while (!observed.at(-1).messages.some(m => JSON.stringify(m.content).includes('Wait for cancellation'))) await new Promise(r => setTimeout(r, 5));
   await assert.rejects(() => council.run('Concurrent call'), /running/i);
+  await assert.rejects(() => council.implementationPlan({ approved: true }), /running/i);
   assert.throws(() => council.start({ cwd: dir, config, mode: 'plan', topic: 'Replacement' }, options), /running/i);
   await council.stop();
   await active;
@@ -140,6 +170,7 @@ try {
   await council.dispose();
   assert.equal(council.meeting, undefined);
   assert.equal(council.sessions.size, 0);
+  await assert.rejects(() => council.implementationPlan({ approved: true }), /No active council/);
   assert.deepEqual(readdirSync(dir), []);
 
   mkdirSync(join(dir, 'extensions'));
@@ -187,6 +218,10 @@ try {
     assert(requests.at(-1).includes('start'));
     assert(tools.has('council'));
     const tool = tools.get('council');
+    const planner = tools.get('council_implementation_plan');
+    assert(planner, 'Detailed planning must be exposed to the parent model');
+    assert(planner.promptGuidelines.some(g => g.includes('chair DONE is not user approval')));
+    assert(planner.promptGuidelines.some(g => g.includes('Do not call council_implementation_plan automatically')));
     assert(tool.promptGuidelines.some(g => g.includes('iterates automatically')));
     await assert.rejects(() => tool.execute('no-meeting', { task: 'Continue' }, new AbortController().signal, undefined, context), /No active council/);
     const originalCreate = sdk.ModelRuntime.create;
@@ -201,6 +236,23 @@ try {
       const followupCalls = observed.slice(startIndex + 6);
       assert(followupCalls.every(o => o.messages.some(m => m.role === 'assistant')));
       assert(followupCalls.every(o => JSON.stringify(o.messages).includes('Reconsider rollback safety')));
+      const planStart = observed.length;
+      await assert.rejects(() => planner.execute('unapproved', { approved: false }, new AbortController().signal, undefined, context), /approval/i);
+      await assert.rejects(() => planner.execute('wrong-cwd', { approved: true }, new AbortController().signal, undefined, { ...context, cwd: '/other' }), /Working directory/);
+      assert.equal(observed.length, planStart);
+      const detailed = await planner.execute('plan', { approved: true, instructions: 'Include migration tests' }, new AbortController().signal, undefined, context);
+      assert.equal(detailed.content[0].text, planOutput);
+      assert.equal(observed.length, planStart + 1);
+      assert.equal(observed.at(-1).id, model.id);
+      assert(observed.at(-1).messages.some(m => m.role === 'assistant'));
+      stall = true;
+      const cancelPlan = new AbortController();
+      const stoppedPlan = assert.rejects(() => planner.execute('stop-plan', { approved: true }, cancelPlan.signal, undefined, context), /stopped/i);
+      while (observed.length < planStart + 2) await new Promise(r => setTimeout(r, 5));
+      cancelPlan.abort();
+      await stoppedPlan;
+      stall = false;
+      assert(!existsSync(join(dir, 'council')), 'No independent plan artifacts');
     } finally { sdk.ModelRuntime.create = originalCreate; }
     const aborted = new AbortController();
     aborted.abort();
@@ -210,5 +262,5 @@ try {
     if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
   }
-  console.log('PASS: config/UI, natural-language tool registration, same in-memory SDK sessions, no saved artifacts, peer exchange, limits, cancellation, timeout, loader');
+  console.log('PASS: config/UI, natural-language tools, same in-memory sessions, automatic discussion, single-model detailed planning, approval guard, complete output limits, no artifacts, cancellation, timeout, loader');
 } finally { await council.dispose(); rmSync(dir, { recursive: true, force: true }); }

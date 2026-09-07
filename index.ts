@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { Council, validateConfig } from './core.mjs';
 
 const help = `Council / Council Plan
-/council-plan <topic> — start an automatically iterated planning discussion
+/council-plan <topic> — discuss and synthesize a design/spec
 /council <topic> — start an automatically iterated general discussion
 /council setup — choose models interactively or create a config template
 /council models — list models with configured authentication
@@ -16,6 +16,8 @@ const help = `Council / Council Plan
 The chair synthesizes after each iteration and decides whether further discussion would help.
 Default limits: 10 iterations per request, 600 seconds per response.
 Afterward, use natural language, e.g. "Have the council reconsider rollback safety."
+After reviewing the design: "I approve this design. Expand it into a detailed implementation plan."
+That second stage uses the chair model only, without another debate or implementation.
 No separate meeting files are saved. Exit or /reload discards the council.`;
 
 export default function (pi: ExtensionAPI) {
@@ -70,6 +72,23 @@ export default function (pi: ExtensionAPI) {
     return (unsavedConfig = config);
   }
 
+  async function withOperation<T>(signal: AbortSignal | undefined, work: () => Promise<T>): Promise<T> {
+    if (working || closing) throw new Error('Council is busy or shutting down');
+    if (signal?.aborted) throw new Error('Council cancelled');
+    working = true;
+    cancelled = false;
+    const abort = () => { cancelled = true; void council.stop(); };
+    signal?.addEventListener('abort', abort, { once: true });
+    try { return await work(); }
+    catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(message.slice(0, 48000) + (message.length > 48000 ? '\n[Error output truncated.]' : ''));
+    } finally {
+      signal?.removeEventListener('abort', abort);
+      working = false;
+    }
+  }
+
   pi.registerTool({
     name: 'council', label: 'Council',
     description: 'Run a multi-model discussion with automatic peer criticism and chair synthesis, stopping when the chair recommends review or the configured iteration limit is reached. Set newMeeting to true to start; otherwise requires and reuses the current in-memory council. Exit/reload discards that council. No separate meeting or PLAN files are saved. Output is limited to 48,000 characters.',
@@ -77,7 +96,7 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       'Use council when the user explicitly requests a multi-model discussion or asks to revisit the active council. Natural-language feedback goes in task.',
       'The council tool iterates automatically. Do not call council again just to continue its loop, retry an error, or bypass its limit without a new user request.',
-      'Treat council synthesis as advice, not proof of agreement or correctness. Do not implement a council plan unless the user asks.',
+      'Treat council synthesis as a design proposal, not proof of agreement or correctness. Present it for user review. Do not automatically call council_implementation_plan or implement anything.',
     ],
     parameters: Type.Object({
       task: Type.String({ description: 'Topic for a new council, or user feedback for the current council' }),
@@ -85,15 +104,9 @@ export default function (pi: ExtensionAPI) {
       mode: Type.Optional(StringEnum(['plan', 'discussion'] as const)),
     }),
     async execute(_id, params, signal, onUpdate, ctx) {
-      if (working || closing) throw new Error('Council is busy or shutting down');
       if (!params.task.trim()) throw new Error('Specify a topic or feedback');
       if (params.task.length > 16000) throw new Error('Task exceeds 16,000 characters');
-      if (signal?.aborted) throw new Error('Council cancelled');
-      working = true;
-      cancelled = false;
-      const abort = () => { cancelled = true; void council.stop(); };
-      signal?.addEventListener('abort', abort, { once: true });
-      try {
+      return withOperation(signal, async () => {
         const fresh = params.newMeeting === true;
         if (!fresh && !council.meeting) throw new Error('No active council. Start a new one with newMeeting: true and the complete topic.');
         if (fresh) {
@@ -121,19 +134,36 @@ export default function (pi: ExtensionAPI) {
           onUpdate?.({ content: [{ type: 'text', text }], details: {} });
         });
         return { content: [{ type: 'text', text: result.slice(0, 48000) + (result.length > 48000 ? '\n[Output truncated; request a shorter synthesis.]' : '') }], details: {} };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(message.slice(0, 48000) + (message.length > 48000 ? '\n[Error output truncated.]' : ''));
-      } finally {
-        signal?.removeEventListener('abort', abort);
-        working = false;
-      }
+      });
+    },
+  });
+
+  pi.registerTool({
+    name: 'council_implementation_plan', label: 'Implementation Plan',
+    description: 'Expand the latest completed council design into a detailed implementation plan using only the configured chair model. Requires explicit user approval of that design. Does not rerun the council, save files, or implement code. Returns the full plan or an error if it exceeds 48,000 UTF-8 bytes / 2,000 lines.',
+    promptSnippet: 'After user approval, expand the current council design into a detailed single-model implementation plan.',
+    promptGuidelines: [
+      'Call council_implementation_plan only after the user explicitly approves the latest council design and asks for detailed planning. Set approved to true only on that basis; chair DONE is not user approval.',
+      'Do not call council_implementation_plan automatically after council. Do not repeat it to retry an error or bypass a timeout without a new user request.',
+      'Pass requested planning detail in instructions. Material design changes must go back to council for review, not be silently added to an approved design.',
+      'Return the detailed plan without implementing it. Approval for planning is not approval for implementation.',
+    ],
+    parameters: Type.Object({
+      approved: Type.Boolean({ description: 'True only if the user explicitly approved the latest design and requested detailed planning' }),
+      instructions: Type.Optional(Type.String({ description: 'Additional planning instructions or requested task scope' })),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      return withOperation(signal, async () => {
+        if (council.meeting && ctx.cwd !== council.meeting.cwd) throw new Error('Working directory changed; start a new council');
+        const result = await council.implementationPlan(params);
+        return { content: [{ type: 'text', text: result }], details: {} };
+      });
     },
   });
 
   for (const [command, mode] of [['council', 'discussion'], ['council-plan', 'plan']] as const) {
     pi.registerCommand(command, {
-      description: mode === 'plan' ? 'Create a PLAN through automatic multi-model discussion' : 'Discuss a topic with multiple models; help / setup / models / stop',
+      description: mode === 'plan' ? 'Discuss a design/spec before detailed implementation planning' : 'Discuss a topic with multiple models; help / setup / models / stop',
       handler: async (args, ctx) => {
         try {
           const input = args.trim();

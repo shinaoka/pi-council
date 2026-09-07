@@ -16,9 +16,11 @@ Inside pi:
 /council-plan Design an offline search feature
 ```
 
-Then use natural language: **“Have the council reconsider migration and rollback safety.”** The parent calls the `council` tool with your feedback, reusing the same in-memory participant sessions. No `new`, `round`, or `finish` commands are needed.
+This first stage produces a **design/spec**, not a detailed implementation plan. Use natural language to refine it: **“Have the council reconsider migration and rollback safety.”** The parent calls the `council` tool with your feedback, reusing the same in-memory participant sessions. No `new`, `round`, or `finish` commands are needed.
 
-`/council <topic>` starts a general discussion instead of a plan. Both topic commands start a fresh council. `/council help`, `/council models`, and `/council setup` provide help and configuration. Use **Esc** to cancel an active tool, or `/council stop`. A normal natural-language stop request may be queued until the current tool finishes, so use these controls for immediate cancellation.
+After reviewing the design, say: **“I approve this design. Expand it into a detailed implementation plan, including rollback tests.”** The parent calls `council_implementation_plan`; only the chair model does that expansion. It does not start another debate or implement anything.
+
+`/council <topic>` starts a general discussion instead of a design/spec discussion. Both topic commands start a fresh council. `/council help`, `/council models`, and `/council setup` provide help and configuration. Use **Esc** to cancel an active tool, or `/council stop`. A normal natural-language stop request may be queued until the current tool finishes, so use these controls for immediate cancellation.
 
 For local development, use `pi -e ./index.ts` or link this directory under `~/.pi/agent/extensions/`. Use only one installation method to avoid duplicate commands.
 
@@ -32,6 +34,27 @@ For local development, use `pi -e ./index.ts` or link this directory under `~/.p
 The default limit is **10 iterations per user request**. Each iteration includes participant responses and one chair synthesis. A fresh council always gets an independent-proposal iteration and then a peer-critique iteration before early stopping (unless you explicitly set `maxRounds` to 1). An explicit follow-up request gets a new bounded loop using the same conversation histories. The chair is one of the participants, not an additional model. Its decision is advice, **not proof of unanimity, correctness or human approval**. A failed participant or malformed chair decision stops the loop rather than pretending consensus or silently retrying.
 
 The `council` tool takes `task` (topic or feedback), optional `newMeeting`, and optional `mode` (`plan` or `discussion`, used when starting). Set `newMeeting: true` to start; otherwise an active council is required. After reload, feedback alone cannot silently start a context-free replacement. The parent model selects the tool for natural-language council requests; it is instructed not to restart the automatic loop without a new user request. The extension does not automatically intercept unrelated conversation or the existing `/plan` command.
+
+## Detailed implementation planning
+
+`council_implementation_plan` takes required `approved: true` and optional `instructions`. The parent is instructed to set approval only after you explicitly approve the latest design and request detailed planning. Chair `DONE` is not user approval, and there is no automatic handoff or extra confirmation dialog. The flag conveys the parent's interpretation of your request; the extension does not independently parse natural-language consent.
+
+The tool uses the latest completed synthesis and peer evidence, plus the chair's retained conversation. It rejects missing approval, a missing/currently failed synthesis, a changed working directory, or a concurrent operation. It does not silently reuse an older design after a failed discussion. Material design changes belong back in council; expansion should not invent solutions for unresolved requirements.
+
+The single-model prompt requests a self-contained plan for an engineer without the chat history:
+
+- Goal, approved design basis, architecture, global constraints and dependencies.
+- Ordered, independently testable tasks with exact create/modify/test paths and consumed/produced interfaces.
+- Checkbox steps, roughly one 2–5 minute action each where realistic.
+- Concrete implementation and test code, exact verification commands/working directories and expected results, including failure/edge cases.
+- Failing-test → minimal-fix → passing-test steps where applicable, final integration checks and sensible commit boundaries.
+- A self-review mapping requirements to tasks/checks, checking cross-task names/types and eliminating placeholders.
+
+Only read-only inspection is available. Commands in the plan are **proposed, not executed**. Unknown material facts should produce explicit blockers/questions, not invented APIs or a supposedly executable plan. These content requirements are prompt instructions, not a guarantee of model correctness; review the actual plan before using it.
+
+Detailed planning has **no 1,200-word discussion limit**, but retains the same configured response deadline (default 600 seconds) and 20-turn budget. `maxRounds` does not apply: this is one chair response run, potentially with read-tool continuations. The full output must fit 48,000 UTF-8 bytes and 2,000 lines; oversized output fails instead of being returned as a silently incomplete plan. Ask to narrow or split the scope if needed.
+
+The result is returned in chat. No files are saved, no additional model setting is needed, and no Superpowers dependency is required. Approval to write a plan is not approval to execute it.
 
 ## Configuration
 
@@ -55,9 +78,9 @@ Choose 2–6 participants. `chair` defaults to the first participant. `maxRounds
 
 ## Time budget and cost
 
-Default: **600 seconds per individual response**, including tool use. The chair gets the same budget for each synthesis. This is not a total meeting deadline. Models receive an English reminder on every discussion/synthesis request with total budget, UTC deadline and remaining seconds, refreshed after tool use. The reminder instructs them to stop exploring in time to return a useful answer with unfinished checks clearly named.
+Default: **600 seconds per individual response**, including tool use. The chair gets the same budget for each synthesis and detailed implementation-plan response. This is not a total meeting deadline. Models receive an English reminder on every discussion/synthesis request with total budget, UTC deadline and remaining seconds, refreshed after tool use. The reminder instructs them to stop exploring in time to return a useful answer with unfinished checks clearly named.
 
-A pi-side timer calls `session.abort()` at the deadline. This is cooperative cancellation, not process isolation. Setup is outside the response budget; model-runtime initialization has a separate 15-second deadline. Each response also has a 20-turn cap. SDK-internal compaction uses its own prompt but remains subject to the response timer.
+A pi-side timer calls `session.abort()` at the deadline. This is cooperative cancellation, not process isolation. Setup is outside the response budget; model-runtime initialization has a separate 15-second deadline. Each response, including detailed planning, also has a 20-turn cap. SDK-internal compaction uses its own prompt but remains subject to the response timer.
 
 Automatic discussion can be expensive: with N participants, up to `(N + 1) × maxRounds` response runs are possible per request, plus tool continuations and SDK compaction. Reduce `maxRounds` or use cheaper models if appropriate. Child usage is not added to the parent's footer.
 
@@ -73,6 +96,6 @@ Automatic discussion can be expensive: with N participants, up to `(N + 1) × ma
 
 ## Verification
 
-Run `npm test`. Tests use real SDK in-memory sessions with mock model streams: same-session follow-up, no saved artifacts, peer exchange, automatic iteration/early stop/limit, failure and invalid chair decisions, cancellation, refreshed time reminders, timeout, setup UI and extension discovery. No model API requests are made. Live provider behavior and real TUI interaction need a separate smoke test.
+Run `npm test`. Tests use real SDK in-memory sessions with mock model streams: same-session follow-up, no saved artifacts, peer exchange, automatic iteration/early stop/limit, failure and invalid chair decisions, single-chair detailed planning, approval/precondition guards, full-output limits, cancellation, refreshed time reminders, timeout, setup UI and extension discovery. No model API requests are made. Live provider behavior and real TUI interaction need a separate smoke test.
 
 Tests resolve the SDK from a local installation, `PI_COUNCIL_SDK` (package directory), or the installed `pi` executable.
