@@ -1,0 +1,21 @@
+{
+  "name": "pin-council",
+  "version": "0.1.0",
+  "description": "Persistent multi-model councils and implementation planning for pi",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shinaoka/pin-council.git"
+  },
+  "engines": { "node": ">=22" },
+  "keywords": ["pi-package", "pi-extension", "multi-model", "planning", "council"],
+  "pi": { "extensions": ["./index.ts"] },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "scripts": {
+    "test": "node tests/check.mjs"
+  },
+  "files": ["index.ts", "core.mjs", "README.md", "LICENSE", "tests/check.mjs"]
+}
