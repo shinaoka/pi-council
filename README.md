@@ -33,7 +33,7 @@ For local development, use `pi -e ./index.ts` or link this directory under `~/.p
 
 The default limit is **10 iterations per user request**. Each iteration includes participant responses and one chair synthesis. A fresh council always gets an independent-proposal iteration and then a peer-critique iteration before early stopping (unless you explicitly set `maxRounds` to 1). An explicit follow-up request gets a new bounded loop using the same conversation histories. The chair is one of the participants, not an additional model. Its decision is advice, **not proof of unanimity, correctness or human approval**. A failed participant or malformed chair decision stops the loop rather than pretending consensus or silently retrying.
 
-The `council` tool takes `task` (topic or feedback), optional `newMeeting`, and optional `mode` (`plan` or `discussion`, used when starting). Set `newMeeting: true` to start; otherwise an active council is required. After reload, feedback alone cannot silently start a context-free replacement. The parent model selects the tool for natural-language council requests; it is instructed not to restart the automatic loop without a new user request. The extension does not automatically intercept unrelated conversation or the existing `/plan` command.
+The `council` tool takes `task` (topic or feedback), optional `context`, optional `newMeeting`, and optional `mode` (`plan` or `discussion`, used when starting). `context` is a concise parent-provided summary of requirements, constraints and known facts; it is stored on the new meeting and passed to every participant, chair synthesis and detailed planning request. The full parent conversation is not copied. Set `newMeeting: true` to start; otherwise an active council is required, and `context` may only be supplied when starting. After reload, feedback alone cannot silently start a context-free replacement. The parent model selects the tool for natural-language council requests; it is instructed not to restart the automatic loop without a new user request. The extension does not automatically intercept unrelated conversation or the existing `/plan` command.
 
 ## Detailed implementation planning
 
@@ -41,7 +41,7 @@ The `council` tool takes `task` (topic or feedback), optional `newMeeting`, and 
 
 The tool uses the latest completed synthesis and peer evidence, plus the chair's retained conversation. It rejects missing approval, a missing/currently failed synthesis, a changed working directory, or a concurrent operation. It does not silently reuse an older design after a failed discussion. Material design changes belong back in council; expansion should not invent solutions for unresolved requirements.
 
-The single-model prompt requests a self-contained plan for an engineer without the chat history:
+The single-model prompt requests a self-contained plan for an engineer without the chat history. It receives the parent-provided context, the latest synthesis and peer evidence:
 
 - Goal, approved design basis, architecture, global constraints and dependencies.
 - Ordered, independently testable tasks with exact create/modify/test paths and consumed/produced interfaces.
@@ -90,12 +90,12 @@ Automatic discussion can be expensive: with N participants, up to `(N + 1) × ma
 - **Exit, `/reload`, or switching parent sessions discards the council.** Pi itself may still persist normal parent chat and tool output under its own settings. This extension is not a no-logging/privacy mode.
 - Starting a new council discards the previous one. Older versions' saved meeting directories are neither used nor deleted.
 - Participants can use only read/grep/find/ls. No child extensions, skills, shell or write tools. This is a tool restriction, not a filesystem sandbox: readable paths outside the project remain accessible.
-- Project context is included only when the parent trusts the project. Parent chat is not copied wholesale; include relevant constraints in the topic or feedback. Native/registered provider definitions and pi's credential files are reused; host request hooks and transient CLI-only credentials are not copied.
+- Project context is included only when the parent trusts the project. Parent chat is not copied wholesale; pass relevant requirements, constraints and known facts explicitly in the new council's `context` field. Native/registered provider definitions and pi's credential files are reused; host request hooks and transient CLI-only credentials are not copied.
 - Peer exchange is limited to 120,000 characters and fails explicitly if exceeded. Parent tool output is bounded to 48,000 characters with an explicit truncation notice. SDK compaction may summarize older participant history.
 - UI, help and built-in instructions are English. Discussion and PLAN language follow the topic/user feedback. Plans require human review; no implementation is started.
 
 ## Verification
 
-Run `npm test`. Tests use real SDK in-memory sessions with mock model streams: same-session follow-up, no saved artifacts, peer exchange, automatic iteration/early stop/limit, failure and invalid chair decisions, single-chair detailed planning, approval/precondition guards, full-output limits, cancellation, refreshed time reminders, timeout, setup UI and extension discovery. No model API requests are made. Live provider behavior and real TUI interaction need a separate smoke test.
+Run `npm test`. Tests use real SDK in-memory sessions with mock model streams: parent context propagation, same-session follow-up, no saved artifacts, peer exchange, automatic iteration/early stop/limit, failure and invalid chair decisions, single-chair detailed planning, approval/precondition guards, full-output limits, cancellation, refreshed time reminders, timeout, setup UI and extension discovery. No model API requests are made. Live provider behavior and real TUI interaction need a separate smoke test.
 
 Tests resolve the SDK from a local installation, `PI_COUNCIL_SDK` (package directory), or the installed `pi` executable.

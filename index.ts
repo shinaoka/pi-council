@@ -17,6 +17,7 @@ The chair synthesizes after each iteration and decides whether further discussio
 Default limits: 10 iterations per request, 600 seconds per response.
 Afterward, use natural language, e.g. "Have the council reconsider rollback safety."
 After reviewing the design: "I approve this design. Expand it into a detailed implementation plan."
+When the parent has extra requirements or constraints, pass them in the council tool's context field.
 That second stage uses the chair model only, without another debate or implementation.
 No separate meeting files are saved. Exit or /reload discards the council.`;
 
@@ -91,23 +92,27 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: 'council', label: 'Council',
-    description: 'Run a multi-model discussion with automatic peer criticism and chair synthesis, stopping when the chair recommends review or the configured iteration limit is reached. Set newMeeting to true to start; otherwise requires and reuses the current in-memory council. Exit/reload discards that council. No separate meeting or PLAN files are saved. Output is limited to 48,000 characters.',
+    description: 'Run a multi-model discussion with automatic peer criticism and chair synthesis, stopping when the chair recommends review or the configured iteration limit is reached. Set newMeeting to true to start; otherwise requires and reuses the current in-memory council. Pass parent-provided requirements, constraints and known facts in context. Exit/reload discards that council. No separate meeting or PLAN files are saved. Output is limited to 48,000 characters.',
     promptSnippet: 'Ask multiple models to discuss a task, or reconsider the active council with new feedback.',
     promptGuidelines: [
       'Use council when the user explicitly requests a multi-model discussion or asks to revisit the active council. Natural-language feedback goes in task.',
       'The council tool iterates automatically. Do not call council again just to continue its loop, retry an error, or bypass its limit without a new user request.',
       'Treat council synthesis as a design proposal, not proof of agreement or correctness. Present it for user review. Do not automatically call council_implementation_plan or implement anything.',
+      'When starting a new council, pass concise parent-provided requirements, constraints and known facts in context; do not copy the full parent conversation.'
     ],
     parameters: Type.Object({
       task: Type.String({ description: 'Topic for a new council, or user feedback for the current council' }),
+      context: Type.Optional(Type.String({ maxLength: 16000, description: 'Concise parent-provided requirements, constraints and known facts for a new council' })),
       newMeeting: Type.Optional(Type.Boolean({ description: 'Discard the current in-memory council and start a new one' })),
       mode: Type.Optional(StringEnum(['plan', 'discussion'] as const)),
     }),
     async execute(_id, params, signal, onUpdate, ctx) {
       if (!params.task.trim()) throw new Error('Specify a topic or feedback');
       if (params.task.length > 16000) throw new Error('Task exceeds 16,000 characters');
+      if (params.context !== undefined && params.context.length > 16000) throw new Error('Context exceeds 16,000 characters');
       return withOperation(signal, async () => {
         const fresh = params.newMeeting === true;
+        if (!fresh && params.context !== undefined) throw new Error('Context can only be supplied when starting a new council');
         if (!fresh && !council.meeting) throw new Error('No active council. Start a new one with newMeeting: true and the complete topic.');
         if (fresh) {
           const config = await configure(ctx);
@@ -123,7 +128,7 @@ export default function (pi: ExtensionAPI) {
             if (provider) runtime.registerProvider(id, provider);
           }
           if (closing || cancelled) throw new Error('Council cancelled');
-          council.start({ cwd: ctx.cwd, config, mode: params.mode ?? 'discussion', topic: params.task },
+          council.start({ cwd: ctx.cwd, config, mode: params.mode ?? 'discussion', topic: params.task, context: params.context },
             { runtime, registry: ctx.modelRegistry, trusted: ctx.isProjectTrusted() });
         } else {
           if (ctx.cwd !== council.meeting.cwd) throw new Error('Working directory changed; start a new council');

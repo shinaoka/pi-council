@@ -39,6 +39,7 @@ assert.throws(() => validateConfig({ participants: [config.participants[0], conf
 let fail = false, stall = false, toolProbe = false, keepDiscussing = false, invalidDecision = false;
 const probeCalls = new Set(), observed = [];
 let planOutput = '# Detailed Implementation Plan\n\n## Task 1\n- [ ] Write the failing test.\n- [ ] Implement the approved change.\n';
+const parentContext = 'Parent constraints: preserve the public API and include rollback coverage.';
 const usage = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 const { AssistantMessageEventStream } = await import(pathToFileURL(join(root, 'node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js')));
 const runtime = {
@@ -74,12 +75,14 @@ const runtime = {
 const options = { runtime, registry, trusted: false };
 const council = new Council({ sdk, agentDir: dir });
 try {
-  council.start({ cwd: dir, config, mode: 'plan', topic: 'Design a small feature' }, options);
+  council.start({ cwd: dir, config, mode: 'plan', topic: 'Design a small feature', context: parentContext }, options);
   const first = await council.run('Initial constraint');
   assert.match(first, /Chair recommends human review/);
   assert.match(first, /Iterations this request: 2\/10/);
   assert(first.includes('Do not start that stage automatically'));
   assert(JSON.stringify(observed[0].messages.at(-2)).includes('design SPEC'));
+  assert(JSON.stringify(observed[0].messages.at(-2)).includes(parentContext));
+  assert(observed.filter(o => JSON.stringify(o.messages.at(-2)).includes('CHAIR SYNTHESIS')).every(o => JSON.stringify(o.messages.at(-2)).includes(parentContext)));
   assert(observed.every(o => !JSON.stringify(o.messages.at(-2)).includes('DETAILED IMPLEMENTATION PLAN')), 'Discussion must not trigger detailed planning');
   assert(council.meeting.lastRound.results.every(r => r.status === 'ok'));
   const sessions = [...council.sessions.values()].map(s => s.session);
@@ -106,7 +109,7 @@ try {
   assert.equal(observed.at(-1).id, model.id);
   assert.equal(council.meeting.lastRound.summary, design, 'Detailed planning must not replace the source design');
   const detailPrompt = JSON.stringify(observed.at(-1).messages.at(-2));
-  for (const phrase of [design, 'Include rollback tests', 'exact file paths', '2–5 minutes', 'test code', 'expected results', 'Self-review']) assert(detailPrompt.includes(phrase), phrase);
+  for (const phrase of [design, parentContext, 'Include rollback tests', 'exact file paths', '2–5 minutes', 'test code', 'expected results', 'Self-review']) assert(detailPrompt.includes(phrase), phrase);
   assert.match(observed.at(-1).systemPrompt, /Detailed implementation plans have no word limit/);
   assert(JSON.stringify(observed.at(-1).messages.at(-1)).includes('TIME BUDGET'));
   assert.deepEqual([...council.sessions.values()].map(s => s.session), sessions);
@@ -228,9 +231,11 @@ try {
     sdk.ModelRuntime.create = async () => runtime;
     try {
       const startIndex = observed.length;
-      const started = await tool.execute('start', { task: 'Design authentication', newMeeting: true, mode: 'plan' }, new AbortController().signal, undefined, context);
+      const started = await tool.execute('start', { task: 'Design authentication', context: parentContext, newMeeting: true, mode: 'plan' }, new AbortController().signal, undefined, context);
       assert(started.content[0].text.includes('Chair recommends human review'));
       assert.equal(observed.length - startIndex, 6);
+      assert(observed.slice(startIndex, startIndex + 6).every(o => JSON.stringify(o.messages).includes(parentContext)));
+      await assert.rejects(() => tool.execute('context-followup', { task: 'Reconsider rollback safety', context: parentContext }, new AbortController().signal, undefined, context), /only be supplied when starting/i);
       const followup = await tool.execute('followup', { task: 'Reconsider rollback safety' }, new AbortController().signal, undefined, context);
       assert(followup.content[0].text.includes('published answer'));
       const followupCalls = observed.slice(startIndex + 6);
