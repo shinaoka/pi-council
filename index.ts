@@ -6,10 +6,16 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Council, validateConfig } from './core.mjs';
 
+const rolePresets = [
+  { name: 'chair', role: 'Requirements-first design chair. Establish detailed requirements, testable acceptance criteria and non-goals before discussing implementation. Do not propose implementation steps or code until the design is complete.' },
+  { name: 'critic', role: 'Adversarial requirements reviewer. Find ambiguity, missing acceptance criteria, edge cases, unsafe assumptions and unnecessary scope. Do not implement.' },
+  { name: 'minimalist', role: 'Minimal-scope advocate. Reject speculative features and abstractions, and prefer the smallest verifiable design. Do not implement.' },
+];
+
 const help = `Council / Council Plan
 /council-plan <topic> — discuss and synthesize a design/spec
 /council <topic> — start an automatically iterated general discussion
-/council setup — choose models interactively or create a config template
+/council setup — choose models interactively with requirements-first role presets, or create a config template
 /council models — list models with configured authentication
 /council stop — cancel active discussion (Esc also cancels a running tool)
 /council help — show this help
@@ -42,9 +48,9 @@ export default function (pi: ExtensionAPI) {
     if (!choice || choice === 'Cancel') return;
     if (choice === 'Create a configuration template') {
       writeFileSync(configFile, JSON.stringify({ participants: [
-        { name: 'architect', model: 'PROVIDER/MODEL_ID', role: 'Propose the simplest viable design', thinking: 'medium' },
-        { name: 'critic', model: 'PROVIDER/OTHER_MODEL_ID', role: 'Challenge assumptions, safety and test coverage', thinking: 'medium' },
-      ], chair: 'architect', timeoutSeconds: 600, maxRounds: 10 }, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+        { name: rolePresets[0].name, model: 'PROVIDER/MODEL_ID', role: rolePresets[0].role, thinking: 'medium' },
+        { name: rolePresets[1].name, model: 'PROVIDER/OTHER_MODEL_ID', role: rolePresets[1].role, thinking: 'medium' },
+      ], chair: rolePresets[0].name, timeoutSeconds: 600, maxRounds: 10 }, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
       show(`Created template: ${configFile}\nReplace placeholders with exact IDs from /council models. No model requests were made.`);
       return;
     }
@@ -52,17 +58,14 @@ export default function (pi: ExtensionAPI) {
     if (!models.length) throw new Error('No models with configured authentication. Use /login first.');
     const participants: { name: string; model: string; role: string; thinking: string }[] = [];
     while (participants.length < 6) {
-      const model = await ctx.ui.select(`Model for participant ${participants.length + 1}`,
+      const preset = rolePresets[participants.length] ?? { name: `member${participants.length + 1}`, role: 'Bring an independent perspective without expanding scope or implementing.' };
+      const model = await ctx.ui.select(`Model for ${preset.name}`,
         participants.length >= 2 ? ['Done choosing', ...models] : models);
       if (!model) return;
       if (model === 'Done choosing') break;
-      const name = await ctx.ui.input('Participant name (letters, digits, _ and -)', `member${participants.length + 1}`);
-      if (!name) return;
-      const role = await ctx.ui.input('Role', participants.length ? 'Challenge assumptions, risks and verification' : 'Propose a simple design');
-      if (!role) return;
       const thinking = await ctx.ui.select('Thinking (SDK adjusts to supported levels)', ['medium', 'low', 'high', 'off', 'minimal', 'xhigh', 'max']);
       if (!thinking) return;
-      participants.push({ name, model, role, thinking });
+      participants.push({ ...preset, model, thinking });
     }
     const chair = await ctx.ui.select('Chair responsible for synthesis', participants.map(p => p.name));
     if (!chair) return;
@@ -98,7 +101,8 @@ export default function (pi: ExtensionAPI) {
       'Use council when the user explicitly requests a multi-model discussion or asks to revisit the active council. Natural-language feedback goes in task.',
       'The council tool iterates automatically. Do not call council again just to continue its loop, retry an error, or bypass its limit without a new user request.',
       'Treat council synthesis as a design proposal, not proof of agreement or correctness. Present it for user review. Do not automatically call council_implementation_plan or implement anything.',
-      'When starting a new council, pass concise parent-provided requirements, constraints and known facts in context; do not copy the full parent conversation.'
+      'When starting a new council, pass concise parent-provided requirements, constraints and known facts in context; do not copy the full parent conversation.',
+      'Models are selected from the local registry; do not assume or require a specific provider or model name. The parent model is the currently active pi session and is not configured here.'
     ],
     parameters: Type.Object({
       task: Type.String({ description: 'Topic for a new council, or user feedback for the current council' }),
@@ -149,6 +153,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: 'After user approval, expand the current council design into a detailed single-model implementation plan.',
     promptGuidelines: [
       'Call council_implementation_plan only after the user explicitly approves the latest council design and asks for detailed planning. Set approved to true only on that basis; chair DONE is not user approval.',
+      'Do not plan from an incomplete design: the plan-mode chair must establish concrete requirements, testable acceptance criteria and the other required design sections first.',
       'Do not call council_implementation_plan automatically after council. Do not repeat it to retry an error or bypass a timeout without a new user request.',
       'Pass requested planning detail in instructions. Material design changes must go back to council for review, not be silently added to an approved design.',
       'Return the detailed plan without implementing it. Approval for planning is not approval for implementation.',
