@@ -5,7 +5,7 @@ import { join, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { Council, validateConfig, resolveParticipants } from '../core.mjs';
+import { Council, applyParticipantOverride, validateConfig, resolveParticipants } from '../core.mjs';
 
 let root = process.env.PI_COUNCIL_SDK;
 if (!root) {
@@ -35,6 +35,26 @@ assert.throws(() => validateConfig({ participants: [] }));
 assert.throws(() => validateConfig({ ...config, chair: 'missing' }));
 assert.throws(() => validateConfig({ ...config, timeoutSeconds: -1 }));
 assert.throws(() => validateConfig({ participants: [config.participants[0], config.participants[0]] }));
+// Runtime participant override: replace the roster, derive names, keep settings.
+assert.equal(applyParticipantOverride(config, undefined), config, 'No override is a no-op');
+const overridden = applyParticipantOverride(config, { participants: [
+  { model: 'test/model/a:1' },
+  { model: 'test/model-b', name: 'renamed', thinking: 'high' },
+] });
+assert.equal(overridden.participants[0].name, 'a-1', 'Name derives from the model id tail, sanitised');
+assert.equal(overridden.participants[0].role, 'Architect', 'Role comes from the configured position');
+assert.equal(overridden.participants[0].thinking, 'medium', 'Thinking comes from the configured position');
+assert.equal(overridden.participants[1].name, 'renamed');
+assert.equal(overridden.participants[1].thinking, 'high');
+assert.equal(overridden.chair, 'a-1', 'A vanished configured chair falls back to the first participant');
+assert.equal(overridden.timeoutSeconds, config.timeoutSeconds, 'Unrelated settings are preserved');
+assert.equal(validateConfig(overridden).chair, 'a-1');
+assert.equal(applyParticipantOverride(config, { participants: [{ model: 'test/x' }, { model: 'test/x' }] }).participants[1].name, 'x-2', 'Derived names are disambiguated');
+assert.equal(applyParticipantOverride(config, { chair: 'b' }).chair, 'b', 'Chair alone can be overridden');
+assert.deepEqual(applyParticipantOverride(config, { chair: 'b' }).participants, config.participants);
+assert.throws(() => validateConfig(applyParticipantOverride(config, { participants: [{ model: 'nodash' }, { model: 'test/x' }] })), /provider/);
+assert.throws(() => validateConfig(applyParticipantOverride(config, { participants: [{ model: 'test/x', extra: 1 }, { model: 'test/y' }] })), /Unknown participant field/);
+assert.throws(() => resolveParticipants(applyParticipantOverride(config, { participants: [{ model: 'missing/x' }, { model: 'test/x' }] }), registry), /Unknown model/);
 
 let fail = false, stall = false, toolProbe = false, keepDiscussing = false, invalidDecision = false, incompleteSpec = false;
 const probeCalls = new Set(), observed = [];
@@ -277,6 +297,9 @@ try {
     assert(planner.promptGuidelines.some(g => g.includes('chair DONE is not user approval')));
     assert(planner.promptGuidelines.some(g => g.includes('Do not call council_implementation_plan automatically')));
     assert(tool.promptGuidelines.some(g => g.includes('iterates automatically')));
+    assert(tool.parameters.properties.participants, 'participants option must be exposed to the parent model');
+    assert(tool.parameters.properties.chair, 'chair option must be exposed to the parent model');
+    await assert.rejects(() => tool.execute('override-followup', { task: 'Reconsider', participants: [{ model: 'test/model/a:1' }, { model: 'test/model-b' }] }, new AbortController().signal, undefined, context), /only be supplied when starting/i);
     await assert.rejects(() => tool.execute('no-meeting', { task: 'Continue' }, new AbortController().signal, undefined, context), /No active council/);
     const originalCreate = sdk.ModelRuntime.create;
     sdk.ModelRuntime.create = async () => runtime;
@@ -309,6 +332,16 @@ try {
       await stoppedPlan;
       stall = false;
       assert(!existsSync(join(dir, 'council')), 'No independent plan artifacts');
+      const overrideStart = observed.length;
+      await tool.execute('override-start', { task: 'Override the roster', newMeeting: true, participants: [
+        { model: 'test/model/a:1', role: 'Architect' },
+        { model: 'test/model-b', thinking: 'off' },
+      ], chair: 'model-b' }, new AbortController().signal, undefined, context);
+      const overrideCalls = observed.slice(overrideStart);
+      assert(overrideCalls.length > 0, 'The overridden council ran');
+      const roster = JSON.stringify(overrideCalls[0].messages);
+      assert(roster.includes('model-b'), 'The override roster reaches the participants');
+      assert(roster.includes('Architect'), 'The override role is used');
     } finally { sdk.ModelRuntime.create = originalCreate; }
     const aborted = new AbortController();
     aborted.abort();

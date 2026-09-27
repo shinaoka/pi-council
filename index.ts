@@ -4,7 +4,9 @@ import { StringEnum } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { Council, validateConfig } from './core.mjs';
+import { Council, applyParticipantOverride, validateConfig } from './core.mjs';
+
+const thinkingLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 
 const rolePresets = [
   { name: 'chair', role: 'Requirements-first design chair. Establish detailed requirements, testable acceptance criteria and non-goals before discussing implementation. Do not propose implementation steps or code until the design is complete.' },
@@ -24,6 +26,8 @@ Default limits: 10 iterations per request, 600 seconds per response.
 Afterward, use natural language, e.g. "Have the council reconsider rollback safety."
 After reviewing the design: "I approve this design. Expand it into a detailed implementation plan."
 When the parent has extra requirements or constraints, pass them in the council tool's context field.
+When a specific roster is wanted, pass the council tool's participants and chair fields with
+model ids from /council models; they start a new council and override both council.json and the setup UI.
 That second stage uses the chair model only, without another debate or implementation.
 No separate meeting files are saved. Exit or /reload discards the council.`;
 
@@ -95,20 +99,28 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: 'council', label: 'Council',
-    description: 'Run a multi-model discussion with automatic peer criticism and chair synthesis, stopping when the chair recommends review or the configured iteration limit is reached. Set newMeeting to true to start; otherwise requires and reuses the current in-memory council. Pass parent-provided requirements, constraints and known facts in context. Exit/reload discards that council. No separate meeting or PLAN files are saved. Output is limited to 48,000 characters.',
+    description: 'Run a multi-model discussion with automatic peer criticism and chair synthesis, stopping when the chair recommends review or the configured iteration limit is reached. Set newMeeting to true to start; otherwise requires and reuses the current in-memory council. Pass parent-provided requirements, constraints and known facts in context. Pass participants (and optional chair) to run a new council on specific models instead of the configured roster. Exit/reload discards that council. No separate meeting or PLAN files are saved. Output is limited to 48,000 characters.',
     promptSnippet: 'Ask multiple models to discuss a task, or reconsider the active council with new feedback.',
     promptGuidelines: [
       'Use council when the user explicitly requests a multi-model discussion or asks to revisit the active council. Natural-language feedback goes in task.',
       'The council tool iterates automatically. Do not call council again just to continue its loop, retry an error, or bypass its limit without a new user request.',
       'Treat council synthesis as a design proposal, not proof of agreement or correctness. Present it for user review. Do not automatically call council_implementation_plan or implement anything.',
       'When starting a new council, pass concise parent-provided requirements, constraints and known facts in context; do not copy the full parent conversation.',
-      'Models are selected from the local registry; do not assume or require a specific provider or model name. The parent model is the currently active pi session and is not configured here.'
+      'Pass participants (2–6 objects with model, optional name, role and thinking) and optional chair to choose the models for a new council; both require newMeeting and override the configured roster for that council.',
+      'Models are selected from the local registry; do not assume or require a specific provider or model name unless the user asks for one. The parent model is the currently active pi session and is not configured here.'
     ],
     parameters: Type.Object({
       task: Type.String({ description: 'Topic for a new council, or user feedback for the current council' }),
       context: Type.Optional(Type.String({ maxLength: 16000, description: 'Concise parent-provided requirements, constraints and known facts for a new council' })),
       newMeeting: Type.Optional(Type.Boolean({ description: 'Discard the current in-memory council and start a new one' })),
       mode: Type.Optional(StringEnum(['plan', 'discussion'] as const)),
+      participants: Type.Optional(Type.Array(Type.Object({
+        name: Type.Optional(Type.String({ maxLength: 64, description: 'Display name; defaults to the model id tail' })),
+        model: Type.String({ maxLength: 300, description: 'provider/exact-model-id, as listed by /council models' }),
+        role: Type.Optional(Type.String({ maxLength: 4000, description: 'Role instruction; defaults to the configured role in this position' })),
+        thinking: Type.Optional(StringEnum(thinkingLevels)),
+      }, { additionalProperties: false }), { minItems: 2, maxItems: 6, description: 'Roster for this new council, replacing the configured participants; requires newMeeting' })),
+      chair: Type.Optional(Type.String({ maxLength: 64, description: 'Participant name that synthesizes; defaults to the configured chair when it is among the new participants' })),
     }),
     async execute(_id, params, signal, onUpdate, ctx) {
       if (!params.task.trim()) throw new Error('Specify a topic or feedback');
@@ -116,11 +128,16 @@ export default function (pi: ExtensionAPI) {
       if (params.context !== undefined && params.context.length > 16000) throw new Error('Context exceeds 16,000 characters');
       return withOperation(signal, async () => {
         const fresh = params.newMeeting === true;
+        const override = params.participants !== undefined || params.chair !== undefined
+          ? { participants: params.participants, chair: params.chair }
+          : undefined;
         if (!fresh && params.context !== undefined) throw new Error('Context can only be supplied when starting a new council');
+        if (!fresh && override) throw new Error('participants and chair can only be supplied when starting a new council (newMeeting: true)');
         if (!fresh && !council.meeting) throw new Error('No active council. Start a new one with newMeeting: true and the complete topic.');
         if (fresh) {
-          const config = await configure(ctx);
-          if (!config) return { content: [{ type: 'text', text: 'Council not started. Finish configuration or request a new discussion when ready.' }], details: {} };
+          const baseConfig = await configure(ctx);
+          if (!baseConfig) return { content: [{ type: 'text', text: 'Council not started. Finish configuration or request a new discussion when ready.' }], details: {} };
+          const config = applyParticipantOverride(baseConfig, override);
           const runtime = await sdk.ModelRuntime.create({
             authPath: join(agentDir, 'auth.json'), modelsPath: join(agentDir, 'models.json'),
             signal: AbortSignal.any([AbortSignal.timeout(15000), ...(signal ? [signal] : [])]), allowModelNetwork: false,

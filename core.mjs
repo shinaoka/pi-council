@@ -46,6 +46,46 @@ export function resolveParticipants(config, registry) {
     return { ...p, model };
   });
 }
+const overrideRole = 'Independent participant. Bring a distinct perspective without expanding scope or implementing.';
+function derivedName(model, index, taken) {
+  const tail = model.slice(model.lastIndexOf('/') + 1) || `participant${index + 1}`;
+  let name = tail.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || `participant${index + 1}`;
+  const base = name;
+  for (let suffix = 2; taken.has(name); suffix += 1) name = `${base.slice(0, 56)}-${suffix}`;
+  taken.add(name);
+  return name;
+}
+/**
+ * Apply a runtime participant override to a validated configuration.
+ *
+ * `override.participants` replaces the configured participant list; a missing
+ * `name` is derived from the model id tail, a missing `role` comes from the
+ * configured participant in the same position, and a missing `thinking` level
+ * comes from that participant too. `override.chair` names the synthesizer and
+ * defaults to the configured chair when it is still among the participants,
+ * otherwise to the first participant. The result is returned unvalidated so the
+ * caller's single `validateConfig` remains the one place that rejects shapes,
+ * model ids, duplicate names and chair names.
+ */
+export function applyParticipantOverride(config, override) {
+  if (!override) return config;
+  check(override.participants !== undefined || override.chair !== undefined, 'Provide participants and/or chair');
+  const participants = override.participants === undefined ? config.participants : override.participants.map((raw, index) => {
+    check(raw && typeof raw === 'object' && !Array.isArray(raw), 'Each participant override must be an object');
+    for (const key of Object.keys(raw)) check(['name', 'model', 'role', 'thinking'].includes(key), `Unknown participant field: ${key}`);
+    const configured = config.participants[index];
+    return {
+      name: raw.name,
+      model: text(raw.model, 'model', 300),
+      role: raw.role ?? configured?.role ?? overrideRole,
+      thinking: raw.thinking ?? configured?.thinking ?? 'medium',
+    };
+  });
+  const taken = new Set(participants.map(p => p.name).filter(name => name !== undefined));
+  const named = participants.map((p, index) => (p.name === undefined ? { ...p, name: derivedName(p.model, index, taken) } : p));
+  const chair = override.chair ?? (named.some(p => p.name === config.chair) ? config.chair : named[0]?.name);
+  return { ...config, participants: named, chair };
+}
 function bounded(prompt) {
   check(prompt.length <= 120000, 'Council exchange exceeds 120,000 characters; start a new meeting with a summary');
   return prompt;
