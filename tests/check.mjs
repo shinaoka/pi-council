@@ -86,7 +86,10 @@ const runtime = {
   getModel: (p, id) => ({ ...model, provider: p, id }),
   streamSimple(m, context, options) {
     const stream = new AssistantMessageEventStream();
-    observed.push({ id: m.id, messages: structuredClone(context.messages), tools: context.tools, systemPrompt: context.systemPrompt });
+    // The installed SDK passes only `messages` into the provider stream, so the
+    // session's tool set and system prompt are asserted through the council's own
+    // session options instead (see the recording-sdk block at the end).
+    observed.push({ id: m.id, messages: structuredClone(context.messages) });
     const emit = (aborted = false) => {
       const error = aborted || (fail && m.id === 'model-b');
       const message = { role: 'assistant', api: m.api, provider: m.provider, model: m.id, usage,
@@ -131,7 +134,6 @@ try {
   assert(council.meeting.lastRound.results.every(r => r.status === 'ok'));
   const sessions = [...council.sessions.values()].map(s => s.session);
   assert(sessions.every(s => s.sessionFile === undefined));
-  assert(observed.every(o => o.tools.map(t => t.name).sort().join(',') === 'find,grep,ls,read'));
   assert(!JSON.stringify(observed[0].messages).includes('model-b: published answer'));
   await council.run('Added rollback requirement');
   assert.deepEqual([...council.sessions.values()].map(s => s.session), sessions, 'Retain the same SDK objects');
@@ -154,7 +156,6 @@ try {
   assert.equal(council.meeting.lastRound.summary, design, 'Detailed planning must not replace the source design');
   const detailPrompt = JSON.stringify(observed.at(-1).messages.at(-2));
   for (const phrase of [design, parentContext, 'Include rollback tests', 'exact file paths', '2–5 minutes', 'test code', 'expected results', 'Self-review']) assert(detailPrompt.includes(JSON.stringify(phrase).slice(1, -1)), phrase);
-  assert.match(observed.at(-1).systemPrompt, /Detailed implementation plans have no word limit/);
   assert(JSON.stringify(observed.at(-1).messages.at(-1)).includes('TIME BUDGET'));
   assert.deepEqual([...council.sessions.values()].map(s => s.session), sessions);
   assert.deepEqual(readdirSync(dir), [], 'Detailed planning must not save files');
@@ -332,16 +333,17 @@ try {
       await stoppedPlan;
       stall = false;
       assert(!existsSync(join(dir, 'council')), 'No independent plan artifacts');
+      const overrideProgress = [];
       const overrideStart = observed.length;
       await tool.execute('override-start', { task: 'Override the roster', newMeeting: true, participants: [
         { model: 'test/model/a:1', role: 'Architect' },
         { model: 'test/model-b', thinking: 'off' },
-      ], chair: 'model-b' }, new AbortController().signal, undefined, context);
-      const overrideCalls = observed.slice(overrideStart);
-      assert(overrideCalls.length > 0, 'The overridden council ran');
-      const roster = JSON.stringify(overrideCalls[0].messages);
-      assert(roster.includes('model-b'), 'The override roster reaches the participants');
+      ], chair: 'model-b' }, new AbortController().signal, update => overrideProgress.push(update?.content?.[0]?.text ?? ''), context);
+      assert(observed.length > overrideStart, 'The overridden council ran');
+      const roster = overrideProgress.join('\n');
       assert(roster.includes('Architect'), 'The override role is used');
+      assert(roster.includes('test/model/a:1'), 'The override model is used');
+      assert(roster.includes('model-b [chair]'), 'The override chair is recorded');
     } finally { sdk.ModelRuntime.create = originalCreate; }
     const aborted = new AbortController();
     aborted.abort();
@@ -351,5 +353,39 @@ try {
     if (oldAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
   }
-  console.log('PASS: config/UI, model-neutral role presets, participant roster, parent context, design gate, natural-language tools, same in-memory sessions, automatic discussion, single-model detailed planning, approval guard, complete output limits, no artifacts, cancellation, timeout, loader');
+  // The installed SDK no longer passes the tool set into the provider stream
+  // context (it carries `messages` only), so record the council's own sandbox
+  // contract instead: every participant session is created with read-only tools.
+  const sessionTools = [], loaderPrompts = [];
+  const recordingSdk = new Proxy(sdk, {
+    get: (target, property) => {
+      if (property === 'createAgentSession') {
+        return sessionOptions => {
+          sessionTools.push(sessionOptions?.tools ?? null);
+          return target.createAgentSession(sessionOptions);
+        };
+      }
+      if (property === 'DefaultResourceLoader') {
+        return class extends target.DefaultResourceLoader {
+          constructor(loaderOptions) {
+            super(loaderOptions);
+            loaderPrompts.push(loaderOptions?.systemPrompt ?? '');
+          }
+        };
+      }
+      return target[property];
+    },
+  });
+  const sandbox = new Council({ sdk: recordingSdk, agentDir: dir });
+  try {
+    sandbox.start({ cwd: dir, config, mode: 'discussion', topic: 'Tool sandbox' }, options);
+    await sandbox.run('Tool sandbox', () => {});
+  } finally { await sandbox.dispose(); }
+  assert(sessionTools.length >= config.participants.length, 'Every participant opens a session');
+  assert(sessionTools.every(tools => (tools ?? []).join(',') === 'read,grep,find,ls'), `Participant sessions must be read-only: ${JSON.stringify(sessionTools)}`);
+  assert(loaderPrompts.length >= config.participants.length, 'Every participant loads the council prompt');
+  assert(loaderPrompts.every(prompt => /Detailed implementation plans have no word limit/.test(prompt)), 'Every participant is told that plans have no word limit');
+  assert(loaderPrompts.every(prompt => /a council participant/.test(prompt)), 'Every participant receives the council role prompt');
+
+  console.log('PASS: config/UI, model-neutral role presets, participant roster, parent context, design gate, natural-language tools, same in-memory sessions, automatic discussion, single-model detailed planning, approval guard, complete output limits, no artifacts, cancellation, timeout, read-only session tools and prompts recorded from the council session options, runtime roster override, loader');
 } finally { await council.dispose(); rmSync(dir, { recursive: true, force: true }); }
