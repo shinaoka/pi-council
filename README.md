@@ -20,7 +20,7 @@ This first stage produces a **design/spec**, not a detailed implementation plan.
 
 After reviewing the design, say: **“I approve this design. Expand it into a detailed implementation plan, including rollback tests.”** The parent calls `council_implementation_plan`; only the chair model does that expansion. It does not start another debate or implement anything.
 
-`/council <topic>` starts a general discussion instead of a design/spec discussion. Both topic commands start a fresh council. `/council help`, `/council models`, and `/council setup` provide help and configuration. Setup selects models from the local registry without assuming a provider or model name, and supplies requirements-first role presets for the chair, critic and optional minimalist. Use **Esc** to cancel an active tool, or `/council stop`. A normal natural-language stop request may be queued until the current tool finishes, so use these controls for immediate cancellation.
+`/council <topic>` starts a general discussion instead of a design/spec discussion. Both topic commands start a fresh council. `/council help`, `/council models`, and `/council setup` provide help and configuration. Setup selects models from the local registry without assuming a provider or model name, supplies requirements-first role presets for the chair, critic and optional minimalist, and lets the user opt trusted registered inspection tools (for example CodeGraph) into participant sessions. Use **Esc** to cancel an active tool, or `/council stop`. A normal natural-language stop request may be queued until the current tool finishes, so use these controls for immediate cancellation.
 
 For local development, use `pi -e ./index.ts` or link this directory under `~/.pi/agent/extensions/`. Use only one installation method to avoid duplicate commands.
 
@@ -34,6 +34,21 @@ For local development, use `pi -e ./index.ts` or link this directory under `~/.p
 The default limit is **10 iterations per user request**. At the start of each request, the tool prints every participant's name, resolved provider/model, role and chair status. Each iteration includes participant responses and one chair synthesis. A fresh council always gets an independent-proposal iteration and then a peer-critique iteration before early stopping (unless you explicitly set `maxRounds` to 1). An explicit follow-up request gets a new bounded loop using the same conversation histories. The chair is one of the participants, not an additional model. Its decision is advice, **not proof of unanimity, correctness or human approval**. A failed participant or malformed chair decision stops the loop rather than pretending consensus or silently retrying.
 
 The `council` tool takes `task` (topic or feedback), optional `context`, optional `newMeeting`, and optional `mode` (`plan` or `discussion`, used when starting). `context` is a concise parent-provided summary of requirements, constraints and known facts; it is stored on the new meeting and passed to every participant, chair synthesis and detailed planning request. The full parent conversation is not copied. Set `newMeeting: true` to start; otherwise an active council is required, and `context` may only be supplied when starting. After reload, feedback alone cannot silently start a context-free replacement. The parent model selects the tool for natural-language council requests; it is instructed not to restart the automatic loop without a new user request. The extension does not automatically intercept unrelated conversation or the existing `/plan` command.
+
+### Large documents and background context
+
+Keep `task` and `context` within **16,000 characters each**. For large material, reuse an existing file and pass its **absolute path**, with an explicit request to read it. If the material exists only in conversation, save the relevant material to a local file first rather than pasting it into either field. Participants have inspection tools; `read` is available by default.
+
+```json
+{
+  "newMeeting": true,
+  "mode": "discussion",
+  "task": "Read /absolute/path/design.md in full and review consistency and unnecessary complexity. Continue paginated reads if truncated; report unread sections.",
+  "context": "Keep the existing API; do not implement. Supporting requirements: /absolute/path/requirements.md."
+}
+```
+
+Prepare oversized single-line artifacts as readable multiline files before dispatch (for example, pretty-printed JSON). A path is a reference, not an automatic attachment: participants must actually read it. They must report inaccessible or unread material, not assume that a filename or summary proves a complete review. These input files are caller-managed; the council still creates no separate meeting or PLAN files.
 
 A new council can also be started on a specific roster without editing `council.json`: pass `participants`, an array of 2–6 objects with `model` (a `provider/exact-model-id` string as listed by `/council models`) and optional `name`, `role` and `thinking`. A missing `name` is derived from the model id tail, a missing `role` or `thinking` comes from the configured participant in the same position, and `chair` names the synthesizer (default: the configured chair when it is among the new participants, otherwise the first participant). The override applies to that council only; the configuration file is still read for the defaults and the time budget, so it must exist.
 
@@ -70,11 +85,15 @@ The result is returned in chat. No files are saved, no additional model setting 
   ],
   "chair": "chair",
   "timeoutSeconds": 600,
-  "maxRounds": 10
+  "maxRounds": 10,
+  "tools": ["read", "grep", "find", "ls", "mcp_codegraph_codegraph_explore"],
+  "extensions": ["/absolute/path/to/the-extension-that-registers-the-extra-tool"]
 }
 ```
 
-Replace model placeholders with exact IDs from `/council models`; the package does not prescribe particular models. Only council participants are configured here: the parent model is the currently active pi session and is not selected or overridden by this file. Authentication remains with pi (`/login`, environment variables, or `models.json`), never in this file. Model IDs are split at the first slash; additional slashes and colons are preserved. Thinking is separate: off/minimal/low/medium/high/xhigh/max; effective SDK-clamped values appear in the result.
+Replace model placeholders with exact IDs from `/council models`; the package does not prescribe particular models. Only council participants are configured here: the parent model is the currently active pi session and is not selected or overridden by this file. Authentication remains with pi (`/login`, environment variables, or `models.json`), never in this file.
+
+`tools` is the participant-session allowlist. If omitted, Pi's SDK read-only set is used (currently `read`, `grep`, `find`, `ls`) without hardcoding it in council core. `extensions` lists trusted extension paths needed to register additional selected tools. `/council setup` discovers parent-registered tools with loadable extension paths and lets the user toggle them; it stores both the selected tool names and their source extension paths. A missing configured tool fails explicitly instead of silently falling back. Selected extensions execute their startup/shutdown code, so this is an authority choice, not a read-only sandbox or an inference from a tool name. Do not select shell or mutating tools for review councils. Model IDs are split at the first slash; additional slashes and colons are preserved. Thinking is separate: off/minimal/low/medium/high/xhigh/max; effective SDK-clamped values appear in the result.
 
 Choose 2–6 participants. Setup supplies model-neutral requirements-first roles: `chair`, `critic`, and optional `minimalist`; role text remains editable directly in the config for non-student use. `chair` defaults to the first participant. `maxRounds` accepts any positive safe integer; `timeoutSeconds` accepts 10–600 seconds. A new council snapshots configuration; edits apply the next time you start a council with a topic command or `newMeeting: true`.
 
@@ -91,13 +110,13 @@ Automatic discussion can be expensive: with N participants, up to `(N + 1) × ma
 - One in-memory SDK session per participant; no waiting child processes and no separate meeting, transcript, session or PLAN files. The final PLAN is returned in chat, not written into the repository.
 - **Exit, `/reload`, or switching parent sessions discards the council.** Pi itself may still persist normal parent chat and tool output under its own settings. This extension is not a no-logging/privacy mode.
 - Starting a new council discards the previous one. Older versions' saved meeting directories are neither used nor deleted.
-- Participants can use only read/grep/find/ls. No child extensions, skills, shell or write tools. This is a tool restriction, not a filesystem sandbox: readable paths outside the project remain accessible.
+- Participant tools are allowlisted by `council.json`. The default comes from Pi's SDK read-only set. `/council setup` can opt trusted registered inspection tools and their source extensions in; no CodeGraph-, MCP-, or provider-specific tool names are hardcoded. Skills and prompt templates remain disabled. Selected extensions execute code and may have external effects even if only an inspection tool is enabled, so tool selection is an explicit trust decision, not a filesystem or side-effect sandbox.
 - Project context is included only when the parent trusts the project. Parent chat is not copied wholesale; pass relevant requirements, constraints and known facts explicitly in the new council's `context` field. Native/registered provider definitions and pi's credential files are reused; host request hooks and transient CLI-only credentials are not copied.
 - Peer exchange is limited to 120,000 characters and fails explicitly if exceeded. Parent tool output is bounded to 48,000 characters with an explicit truncation notice. SDK compaction may summarize older participant history.
 - UI, help and built-in instructions are English. Discussion and PLAN language follow the topic/user feedback. At startup, the participant roster includes configured roles and resolved model IDs. In plan mode, the chair cannot pass the design gate without the required sections. Plans require human review; no implementation is started.
 
 ## Verification
 
-Run `npm test`. Tests use real SDK in-memory sessions with mock model streams: parent context propagation, same-session follow-up, fresh-council session disposal, no saved artifacts, peer exchange, automatic iteration/early stop/limit, failure and invalid chair decisions, single-chair detailed planning, approval/precondition guards, full-output limits, cancellation, refreshed time reminders, timeout, setup UI, extension discovery and the runtime participant roster override. No model API requests are made. Live provider behavior and real TUI interaction need a separate smoke test.
+Run `npm test`. Tests use real SDK in-memory sessions with mock model streams: parent context propagation, same-session follow-up, fresh-council session disposal, no saved artifacts, peer exchange, automatic iteration/early stop/limit, failure and invalid chair decisions, single-chair detailed planning, approval/precondition guards, full-output limits, cancellation, refreshed time reminders, timeout, setup UI, configurable inspection-tool discovery/loading, extension discovery and the runtime participant roster override. No model API requests are made. Live provider behavior and real TUI interaction need a separate smoke test.
 
 Tests resolve the SDK from a local installation, `PI_COUNCIL_SDK` (package directory), or the installed `pi` executable.

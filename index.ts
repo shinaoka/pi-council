@@ -3,7 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-a
 import { StringEnum } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { Council, applyParticipantOverride, validateConfig } from './core.mjs';
 
 const thinkingLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
@@ -17,7 +17,7 @@ const rolePresets = [
 const help = `Council / Council Plan
 /council-plan <topic> — discuss and synthesize a design/spec
 /council <topic> — start an automatically iterated general discussion
-/council setup — choose models interactively with requirements-first role presets, or create a config template
+/council setup — choose models and optional inspection tools, edit existing tool permissions, or create a config template
 /council models — list models with configured authentication
 /council stop — cancel active discussion (Esc also cancels a running tool)
 /council help — show this help
@@ -25,7 +25,10 @@ The chair synthesizes after each iteration and decides whether further discussio
 Default limits: 10 iterations per request, 600 seconds per response.
 Afterward, use natural language, e.g. "Have the council reconsider rollback safety."
 After reviewing the design: "I approve this design. Expand it into a detailed implementation plan."
-When the parent has extra requirements or constraints, pass them in the council tool's context field.
+Keep extra requirements and constraints concise in the council tool's context field (16,000 characters).
+For large documents or background context, pass absolute file paths and ask participants to read them;
+participants have configured inspection tools (read is available by default). Reuse existing files.
+Configure participant tools and additional extension paths in council.json; no provider-specific wiring is needed.
 When a specific roster is wanted, pass the council tool's participants and chair fields with
 model ids from /council models; they start a new council and override both council.json and the setup UI.
 That second stage uses the chair model only, without another debate or implementation.
@@ -42,9 +45,37 @@ export default function (pi: ExtensionAPI) {
   };
   const available = (ctx: ExtensionContext) => ctx.modelRegistry.getAvailable().map(m => `${m.provider}/${m.id}`).sort();
 
-  async function configure(ctx: ExtensionContext) {
-    if (existsSync(configFile)) return validateConfig(JSON.parse(readFileSync(configFile, 'utf8')));
-    if (unsavedConfig) return unsavedConfig;
+  async function chooseTools(ctx: ExtensionContext, config: ReturnType<typeof validateConfig>) {
+    const candidates = pi.getAllTools().filter(tool =>
+      isAbsolute(tool.sourceInfo.path) && !['council', 'council_implementation_plan'].includes(tool.name));
+    if (!candidates.length) return config;
+    const selected = new Set<string>(config.tools ?? sdk.createReadOnlyTools(ctx.cwd).map(tool => tool.name));
+    const labels = candidates.map(tool => `${tool.name} — ${tool.description.slice(0, 100)}`);
+    while (true) {
+      const choices = labels.map((label, i) => `${selected.has(candidates[i].name) ? '[x]' : '[ ]'} ${label}`);
+      const choice = await ctx.ui.select('Council inspection tools: select to toggle (only permit trusted tools)', ['Done selecting tools', ...choices, 'Cancel']);
+      if (!choice || choice === 'Cancel') return;
+      if (choice === 'Done selecting tools') break;
+      const name = candidates[choices.indexOf(choice)]?.name;
+      if (name) { if (selected.has(name)) selected.delete(name); else selected.add(name); }
+    }
+    const discoveredPaths = new Set(candidates.map(tool => tool.sourceInfo.path));
+    const extensions = new Set<string>((config.extensions ?? []).filter((path: string) => !discoveredPaths.has(path)));
+    for (const tool of candidates) if (selected.has(tool.name)) extensions.add(tool.sourceInfo.path);
+    return validateConfig({ ...config, tools: [...selected], extensions: [...extensions] });
+  }
+
+  async function configure(ctx: ExtensionContext, editTools = false) {
+    const existing = existsSync(configFile) ? validateConfig(JSON.parse(readFileSync(configFile, 'utf8'))) : unsavedConfig;
+    if (existing) {
+      if (!editTools || !ctx.hasUI) return existing;
+      const updated = await chooseTools(ctx, existing);
+      if (!updated) return;
+      if (JSON.stringify(updated) === JSON.stringify(existing)) return existing;
+      if (!await ctx.ui.confirm('Save council tool permissions?', `${configFile}\nTools: ${(updated.tools ?? []).join(', ')}\nExtensions: ${(updated.extensions ?? []).join(', ')}\nSelected extensions execute trusted code at startup/shutdown; tool selection is not a sandbox.`)) return existing;
+      writeFileSync(configFile, JSON.stringify(updated, null, 2) + '\n', { mode: 0o600 });
+      return (unsavedConfig = updated);
+    }
     if (!ctx.hasUI) throw new Error(`Create a configuration file first: ${configFile}`);
     const choice = await ctx.ui.select('Council configuration is missing', [
       'Choose registered models interactively', 'Create a configuration template', 'Cancel',
@@ -73,8 +104,9 @@ export default function (pi: ExtensionAPI) {
     }
     const chair = await ctx.ui.select('Chair responsible for synthesis', participants.map(p => p.name));
     if (!chair) return;
-    const config = validateConfig({ participants, chair });
-    if (await ctx.ui.confirm('Save this configuration?', configFile)) {
+    const config = await chooseTools(ctx, validateConfig({ participants, chair }));
+    if (!config) return;
+    if (await ctx.ui.confirm('Save this configuration?', `${configFile}\nTools: ${(config.tools ?? sdk.createReadOnlyTools(ctx.cwd).map(tool => tool.name)).join(', ')}\nExtensions: ${(config.extensions ?? []).join(', ')}\nSelected extensions execute trusted code at startup/shutdown; tool selection is not a sandbox.`)) {
       writeFileSync(configFile, JSON.stringify(config, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
     }
     return (unsavedConfig = config);
@@ -99,19 +131,21 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: 'council', label: 'Council',
-    description: 'Run a multi-model discussion with automatic peer criticism and chair synthesis, stopping when the chair recommends review or the configured iteration limit is reached. Set newMeeting to true to start; otherwise requires and reuses the current in-memory council. Pass parent-provided requirements, constraints and known facts in context. Pass participants (and optional chair) to run a new council on specific models instead of the configured roster. Exit/reload discards that council. No separate meeting or PLAN files are saved. Output is limited to 48,000 characters.',
+    description: 'Run a multi-model discussion with automatic peer criticism and chair synthesis, stopping when the chair recommends review or the configured iteration limit is reached. Set newMeeting to true to start; otherwise requires and reuses the current in-memory council. Keep context concise (16,000 characters maximum); for large documents or background context, pass absolute file paths and ask participants to read them with their configured inspection tools rather than pasting the contents. Pass participants (and optional chair) to run a new council on specific models instead of the configured roster. Exit/reload discards that council. No separate meeting or PLAN files are saved. Output is limited to 48,000 characters.',
     promptSnippet: 'Ask multiple models to discuss a task, or reconsider the active council with new feedback.',
     promptGuidelines: [
       'Use council when the user explicitly requests a multi-model discussion or asks to revisit the active council. Natural-language feedback goes in task.',
       'The council tool iterates automatically. Do not call council again just to continue its loop, retry an error, or bypass its limit without a new user request.',
       'Treat council synthesis as a design proposal, not proof of agreement or correctness. Present it for user review. Do not automatically call council_implementation_plan or implement anything.',
       'When starting a new council, pass concise parent-provided requirements, constraints and known facts in context; do not copy the full parent conversation.',
+      'For large documents or background context, pass absolute file paths in task/context and explicitly ask participants to read them with their configured inspection tools (read is available by default). Reuse existing files; if the material exists only in conversation, save the relevant material to a local file first. Keep task and context within 16,000 characters each; do not paste large contents into either field.',
+      'Prepare oversized single-line artifacts as readable multiline files before dispatch (for example, pretty-printed JSON). Shell access is not enabled by default; ask participants to continue paginated reads when truncated and report any unread material rather than claim a complete review.',
       'Pass participants (2–6 objects with model, optional name, role and thinking) and optional chair to choose the models for a new council; both require newMeeting and override the configured roster for that council.',
       'Models are selected from the local registry; do not assume or require a specific provider or model name unless the user asks for one. The parent model is the currently active pi session and is not configured here.'
     ],
     parameters: Type.Object({
       task: Type.String({ description: 'Topic for a new council, or user feedback for the current council' }),
-      context: Type.Optional(Type.String({ maxLength: 16000, description: 'Concise parent-provided requirements, constraints and known facts for a new council' })),
+      context: Type.Optional(Type.String({ maxLength: 16000, description: 'Concise requirements, constraints and known facts; for large context, supply absolute file paths and ask participants to read them instead of pasting contents' })),
       newMeeting: Type.Optional(Type.Boolean({ description: 'Discard the current in-memory council and start a new one' })),
       mode: Type.Optional(StringEnum(['plan', 'discussion'] as const)),
       participants: Type.Optional(Type.Array(Type.Object({
@@ -149,7 +183,7 @@ export default function (pi: ExtensionAPI) {
             if (provider) runtime.registerProvider(id, provider);
           }
           if (closing || cancelled) throw new Error('Council cancelled');
-          council.start({ cwd: ctx.cwd, config, mode: params.mode ?? 'discussion', topic: params.task, context: params.context },
+          await council.start({ cwd: ctx.cwd, config, mode: params.mode ?? 'discussion', topic: params.task, context: params.context },
             { runtime, registry: ctx.modelRegistry, trusted: ctx.isProjectTrusted() });
         } else {
           if (ctx.cwd !== council.meeting.cwd) throw new Error('Working directory changed; start a new council');
@@ -199,7 +233,7 @@ export default function (pi: ExtensionAPI) {
           if (input === 'stop') { cancelled = true; await council.stop(); show('Council stop requested.'); return; }
           if (working) throw new Error('Council is running. Use Esc or /council stop to cancel.');
           if (input === 'setup') {
-            const config = await configure(ctx);
+            const config = await configure(ctx, true);
             if (config) show(`${existsSync(configFile) ? configFile : 'Unsaved configuration'}\n${JSON.stringify(config, null, 2)}`);
             return;
           }

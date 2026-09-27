@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, realpathSync, existsSync, unlinkSync, mkdirSync, symlinkSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, realpathSync, existsSync, unlinkSync, mkdirSync, symlinkSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -35,6 +35,11 @@ assert.throws(() => validateConfig({ participants: [] }));
 assert.throws(() => validateConfig({ ...config, chair: 'missing' }));
 assert.throws(() => validateConfig({ ...config, timeoutSeconds: -1 }));
 assert.throws(() => validateConfig({ participants: [config.participants[0], config.participants[0]] }));
+const configuredTools = validateConfig({ ...config, tools: ['read', 'read', 'inspect_repo'], extensions: ['/tmp/inspect.ts', '/tmp/inspect.ts'] });
+assert.deepEqual(configuredTools.tools, ['read', 'inspect_repo']);
+assert.deepEqual(configuredTools.extensions, ['/tmp/inspect.ts']);
+assert.throws(() => validateConfig({ ...config, tools: [''] }), /tools/);
+assert.throws(() => validateConfig({ ...config, extensions: [1] }), /extensions/);
 // Runtime participant override: replace the roster, derive names, keep settings.
 assert.equal(applyParticipantOverride(config, undefined), config, 'No override is a no-op');
 const overridden = applyParticipantOverride(config, { participants: [
@@ -116,9 +121,13 @@ const runtime = {
   },
 };
 const options = { runtime, registry, trusted: false };
+const missingToolCouncil = new Council({ sdk, agentDir: dir });
+await missingToolCouncil.start({ cwd: dir, config: { ...config, tools: ['read', 'missing_inspector'] }, mode: 'discussion', topic: 'Missing tool' }, options);
+await assert.rejects(() => missingToolCouncil.run(), /Configured council tools are unavailable: missing_inspector/);
+await missingToolCouncil.dispose();
 const council = new Council({ sdk, agentDir: dir });
 try {
-  council.start({ cwd: dir, config, mode: 'plan', topic: 'Design a small feature', context: parentContext }, options);
+  await council.start({ cwd: dir, config, mode: 'plan', topic: 'Design a small feature', context: parentContext }, options);
   const progress = [];
   const first = await council.run('Initial constraint', text => progress.push(text));
   assert.match(first, /Chair recommends human review/);
@@ -172,7 +181,7 @@ try {
     const dispose = session.dispose.bind(session);
     session.dispose = () => { disposed++; return dispose(); };
   }
-  council.start({ cwd: dir, config, mode: 'discussion', topic: 'Fresh council' }, options);
+  await council.start({ cwd: dir, config, mode: 'discussion', topic: 'Fresh council' }, options);
   assert.equal(disposed, oldSessions.length, 'A fresh council must dispose previous participant sessions');
 
   fail = true;
@@ -188,14 +197,14 @@ try {
   while (!observed.at(-1).messages.some(m => JSON.stringify(m.content).includes('Wait for cancellation'))) await new Promise(r => setTimeout(r, 5));
   await assert.rejects(() => council.run('Concurrent call'), /running/i);
   await assert.rejects(() => council.implementationPlan({ approved: true }), /running/i);
-  assert.throws(() => council.start({ cwd: dir, config, mode: 'plan', topic: 'Replacement' }, options), /running/i);
+  await assert.rejects(() => council.start({ cwd: dir, config, mode: 'plan', topic: 'Replacement' }, options), /running/i);
   await council.stop();
   await active;
   assert(council.meeting.lastRound.results.every(r => r.status === 'error'));
   stall = false;
 
   keepDiscussing = true;
-  council.start({ cwd: dir, config: { ...config, maxRounds: 2 }, mode: 'discussion', topic: 'Two iterations' }, options);
+  await council.start({ cwd: dir, config: { ...config, maxRounds: 2 }, mode: 'discussion', topic: 'Two iterations' }, options);
   const beforeLimit = observed.length;
   const capped = await council.run();
   assert.equal(observed.length - beforeLimit, 6, 'Two peer calls plus one chair call per iteration');
@@ -207,7 +216,7 @@ try {
   invalidDecision = false;
 
   incompleteSpec = true;
-  council.start({ cwd: dir, config: { ...config, maxRounds: 3 }, mode: 'plan', topic: 'Incomplete design' }, options);
+  await council.start({ cwd: dir, config: { ...config, maxRounds: 3 }, mode: 'plan', topic: 'Incomplete design' }, options);
   const gateStart = observed.length;
   const incomplete = await council.run();
   assert.match(incomplete, /Iteration limit reached/);
@@ -216,7 +225,7 @@ try {
   incompleteSpec = false;
 
   toolProbe = true;
-  council.start({ cwd: dir, config, mode: 'discussion', topic: 'Tool deadline test' }, options);
+  await council.start({ cwd: dir, config, mode: 'discussion', topic: 'Tool deadline test' }, options);
   const probeStart = observed.length;
   await council.run();
   const calls = observed.slice(probeStart).filter(o => !JSON.stringify(o.messages.at(-2)).includes('CHAIR SYNTHESIS'));
@@ -229,7 +238,7 @@ try {
   }
   toolProbe = false;
   stall = true;
-  council.start({ cwd: dir, config: { ...config, timeoutSeconds: 10 }, mode: 'discussion', topic: 'Timeout' }, options);
+  await council.start({ cwd: dir, config: { ...config, timeoutSeconds: 10 }, mode: 'discussion', topic: 'Timeout' }, options);
   await assert.rejects(() => council.run(), /deadline/);
   assert(council.meeting.lastRound.results.every(r => r.status === 'error' && r.error.includes('deadline')));
   stall = false;
@@ -257,7 +266,8 @@ try {
   process.env.PI_CODING_AGENT_DIR = dir;
   try {
     const commands = new Map(), tools = new Map(), events = new Map(), messages = [], requests = [];
-    factory({ registerCommand: (n, c) => commands.set(n, c), registerTool: t => tools.set(t.name, t),
+    let exposedTools = [];
+    factory({ registerCommand: (n, c) => commands.set(n, c), registerTool: t => tools.set(t.name, t), getAllTools: () => exposedTools,
       on: (n, f) => events.set(n, f), sendUserMessage: m => requests.push(m),
       sendMessage: (m, opts) => { assert.equal(opts.triggerTurn, false); messages.push(m.content); } });
     const selections = ['Cancel'];
@@ -288,6 +298,15 @@ try {
     assert.deepEqual(interactiveConfig.participants.map(p => p.name), ['chair', 'critic']);
     assert.match(interactiveConfig.participants[0].role, /Requirements-first/);
     assert.match(interactiveConfig.participants[1].role, /Adversarial requirements reviewer/);
+    const inspectionExtension = join(dir, 'inspect-extension.ts');
+    writeFileSync(inspectionExtension, `export default function (pi) { pi.registerTool({ name: 'inspect_repo', label: 'Inspect repository', description: 'Inspect repository structure', parameters: { type: 'object', properties: {}, additionalProperties: false }, async execute() { return { content: [{ type: 'text', text: 'inspected' }], details: {} }; } }); }\n`);
+    exposedTools = [{ name: 'inspect_repo', description: 'Inspect repository structure', parameters: {}, promptGuidelines: [], sourceInfo: { path: inspectionExtension, source: 'test', scope: 'user', origin: 'top-level' } }];
+    selections.push('[ ] inspect_repo — Inspect repository structure', 'Done selecting tools');
+    await command.handler('setup', context);
+    const toolConfig = JSON.parse(readFileSync(join(dir, 'council.json'), 'utf8'));
+    assert(toolConfig.tools.includes('inspect_repo'), 'Setup stores an opted-in discovered inspection tool');
+    assert(toolConfig.tools.includes('read'), 'Setup preserves the SDK read-only defaults');
+    assert.deepEqual(toolConfig.extensions, [inspectionExtension], 'Setup stores the selected tool source extension without tool-specific wiring');
     await commands.get('council-plan').handler('Design authentication', context);
     assert(requests.at(-1).includes('Design authentication'));
     assert(requests.at(-1).includes('start'));
@@ -298,6 +317,10 @@ try {
     assert(planner.promptGuidelines.some(g => g.includes('chair DONE is not user approval')));
     assert(planner.promptGuidelines.some(g => g.includes('Do not call council_implementation_plan automatically')));
     assert(tool.promptGuidelines.some(g => g.includes('iterates automatically')));
+    assert(tool.promptGuidelines.some(g => g.includes('absolute file paths') && g.includes('16,000 characters each')));
+    assert(tool.promptGuidelines.some(g => g.includes('single-line artifacts') && g.includes('paginated reads')));
+    assert.match(tool.description, /absolute file paths/);
+    assert.match(tool.parameters.properties.context.description, /absolute file paths/);
     assert(tool.parameters.properties.participants, 'participants option must be exposed to the parent model');
     assert(tool.parameters.properties.chair, 'chair option must be exposed to the parent model');
     await assert.rejects(() => tool.execute('override-followup', { task: 'Reconsider', participants: [{ model: 'test/model/a:1' }, { model: 'test/model-b' }] }, new AbortController().signal, undefined, context), /only be supplied when starting/i);
@@ -378,7 +401,7 @@ try {
   });
   const sandbox = new Council({ sdk: recordingSdk, agentDir: dir });
   try {
-    sandbox.start({ cwd: dir, config, mode: 'discussion', topic: 'Tool sandbox' }, options);
+    await sandbox.start({ cwd: dir, config, mode: 'discussion', topic: 'Tool sandbox' }, options);
     await sandbox.run('Tool sandbox', () => {});
   } finally { await sandbox.dispose(); }
   assert(sessionTools.length >= config.participants.length, 'Every participant opens a session');
@@ -386,6 +409,7 @@ try {
   assert(loaderPrompts.length >= config.participants.length, 'Every participant loads the council prompt');
   assert(loaderPrompts.every(prompt => /Detailed implementation plans have no word limit/.test(prompt)), 'Every participant is told that plans have no word limit');
   assert(loaderPrompts.every(prompt => /a council participant/.test(prompt)), 'Every participant receives the council role prompt');
+  assert(loaderPrompts.every(prompt => /read files explicitly referenced/.test(prompt) && /paginated reads/.test(prompt) && /unread material/.test(prompt)), 'Participants must inspect referenced files and disclose incomplete reads');
 
-  console.log('PASS: config/UI, model-neutral role presets, participant roster, parent context, design gate, natural-language tools, same in-memory sessions, automatic discussion, single-model detailed planning, approval guard, complete output limits, no artifacts, cancellation, timeout, read-only session tools and prompts recorded from the council session options, runtime roster override, loader');
+  console.log('PASS: config/UI, model-neutral role presets, participant roster, parent context, design gate, natural-language tools, same in-memory sessions, automatic discussion, single-model detailed planning, approval guard, complete output limits, no artifacts, cancellation, timeout, configurable inspection-tool discovery/loading and missing-tool failure, runtime roster override, loader');
 } finally { await council.dispose(); rmSync(dir, { recursive: true, force: true }); }
